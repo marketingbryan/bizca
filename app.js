@@ -189,12 +189,18 @@
         '<p class="hint" style="text-align:center;margin:12px 0">' + (batchMode ? 'Batch mode: shoot several cards in a row.' : 'Single mode: capture, then finalize now.') + '</p>' +
         '<button class="btn primary" id="capture">' + ic.camera + ' Capture card</button>' +
         '<button class="btn ghost" id="gallery" style="margin-top:10px">Choose from gallery</button>' +
+        '<input type="file" accept="image/*" capture="environment" id="camInput" style="display:none">' +
+        '<input type="file" accept="image/*" id="galInput" style="display:none">' +
       '</div>' +
       '<div class="banner">' + ic.bolt + '<div>A vision AI model reads the card and pre-fills name, company, role, email, phone, website and address. You confirm in a tap.</div></div>' +
       queuePreview();
     shell('Scan', null, body, '#/scan', { back:'#/home', bind(){
       $('#batchToggle').onclick = () => { batchMode = !batchMode; render(); };
-      $('#capture').onclick = doCapture; $('#gallery').onclick = doCapture;
+      const cam = $('#camInput'), gal2 = $('#galInput');
+      $('#capture').onclick = () => cam.click();
+      $('#gallery').onclick = () => gal2.click();
+      const onPick = e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) handleCardFile(f); };
+      cam.onchange = onPick; gal2.onchange = onPick;
     }});
   }
   function queuePreview() {
@@ -203,24 +209,61 @@
     return '<div class="section-title">In queue (' + q.length + ')</div>' +
       '<button class="rowbtn" data-nav="#/batch"><div class="lead-ic">' + ic.grid + '</div><div style="flex:1"><div style="font-weight:600">Batch queue</div><div class="hint" style="margin:0">' + q.length + ' card(s) to finalize</div></div>' + ic.chevR + '</button>';
   }
-  function doCapture() {
+  function handleCardFile(file) {
     const sv = $('#scanview');
-    sv.innerHTML = '<div class="scanline"></div><div style="text-align:center"><div class="spinner" style="margin:0 auto 10px"></div><div style="color:#CBD5E1;font-size:13px">Reading card with AI…</div></div>';
+    if (sv) sv.innerHTML = '<div class="scanline"></div><div style="text-align:center"><div class="spinner" style="margin:0 auto 10px"></div><div style="color:#CBD5E1;font-size:13px">Reading card with AI…</div></div>';
     const cap = $('#capture'), gal = $('#gallery'); if (cap) cap.disabled = true; if (gal) gal.disabled = true;
-    setTimeout(() => {
+    fileToDataURL(file, 1100, url => {
+      if (!url) { toast('Could not read image', 'err'); scanScreen(); return; }
+      runScan(url);
+    });
+  }
+
+  // Downscale the photo client-side to keep the request small and cheap
+  function fileToDataURL(file, maxDim, cb) {
+    const img = new Image(); const objUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+      const s = Math.min(1, maxDim / Math.max(w, h));
+      w = Math.round(w * s); h = Math.round(h * s);
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(objUrl);
+      try { cb(cv.toDataURL('image/jpeg', 0.82)); } catch (e) { cb(null); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(objUrl); cb(null); };
+    img.src = objUrl;
+  }
+
+  // Send the image to the serverless OpenAI proxy; fall back to demo data on failure
+  async function runScan(dataURL) {
+    try {
+      const res = await fetch('/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataURL }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+      finishScan(data, dataURL, true);
+    } catch (e) {
       const c = DB.sampleCards[scanIndex % DB.sampleCards.length]; scanIndex++;
-      const ev = activeEvent();
-      const lead = {
-        id: 'l' + Date.now(), first:c.first, last:c.last, company:c.company, role:c.role,
-        email:c.email, phone:c.phone, website:c.website, address:c.address,
-        provenienza: ev.preset.provenienza || '', country: ev.preset.country || c.country || '', interesse: ev.preset.interesse || '',
-        eventId: ev.id, ownerId:null, createdBy:user().id, status:'To finalize', override:false, ts:Date.now()
-      };
-      const a = assign(lead.country, lead.interesse); lead.ownerId = requiredFilled(lead) ? a.owner : (lead.country&&lead.interesse? a.owner : null);
-      DB.leads.unshift(lead);
-      if (batchMode) { toast('Card captured — added to queue', 'ok'); scanScreen(); }
-      else go('#/lead?id=' + lead.id);
-    }, 1600);
+      finishScan(c, dataURL, false, e.message);
+    }
+  }
+
+  function finishScan(d, image, isReal, errMsg) {
+    d = d || {};
+    const ev = activeEvent();
+    const lead = {
+      id: 'l' + Date.now(),
+      first: d.first || '', last: d.last || '', company: d.company || '', role: d.role || '',
+      email: d.email || '', phone: d.phone || '', website: d.website || '', address: d.address || '',
+      provenienza: ev.preset.provenienza || '', country: ev.preset.country || d.country || '', interesse: ev.preset.interesse || '',
+      eventId: ev.id, ownerId: null, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
+    };
+    if (lead.country && lead.interesse) lead.ownerId = assign(lead.country, lead.interesse).owner;
+    DB.leads.unshift(lead);
+    if (isReal) toast('Card read with AI', 'ok');
+    else toast('AI unavailable — demo data used', 'err');
+    if (batchMode) scanScreen();
+    else go('#/lead?id=' + lead.id);
   }
 
   /* ---------- Lead finalize / detail ---------- */
@@ -249,7 +292,7 @@
 
       (l.status==='Error' ? '<div class="banner" style="background:#FEF2F2;border-color:#FECACA;color:#991B1B">'+ic.alert+'<div>'+esc(l.error||'Send failed')+'</div></div>' : '') +
 
-      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>Contact</h3><span class="pill indigo">'+ic.bolt+' AI extracted</span></div><p class="hint">Confirm or fix the fields below.</p>' + contactFields + '</div>' +
+      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>Contact</h3><span class="pill indigo">'+ic.bolt+' AI extracted</span></div><p class="hint">Confirm or fix the fields below.</p>' + (l.image ? '<img src="'+l.image+'" alt="business card" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;margin-bottom:12px;border:1px solid var(--line)">' : '') + contactFields + '</div>' +
 
       '<div class="card"><h3>Qualification</h3><p class="hint">Required before sending. Managed as closed lists by admin.</p>' +
         '<div class="field"><label>Source (provenienza) <span class="req">*</span></label><select class="input" data-q="provenienza" '+(readOnly?'disabled':'')+'>'+provOpts+'</select></div>' +
