@@ -1,0 +1,19 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#06B6D4"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Business card -->
+  <rect x="112" y="150" width="220" height="140" rx="20" fill="#FFFFFF"/>
+  <circle cx="158" cy="196" r="18" fill="#C7D2FE"/>
+  <rect x="192" y="184" width="108" height="14" rx="7" fill="#4F46E5"/>
+  <rect x="192" y="210" width="76" height="12" rx="6" fill="#A5B4FC"/>
+  <rect x="136" y="250" width="164" height="12" rx="6" fill="#CBD5E1"/>
+  <!-- Flow arrow to node -->
+  <path d="M300 320 C 360 320, 360 372, 416 372" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" fill="none"/>
+  <circle cx="416" cy="372" r="30" fill="#FFFFFF"/>
+  <path d="M405 372 l 8 9 l 16 -18" stroke="#06B6D4" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
