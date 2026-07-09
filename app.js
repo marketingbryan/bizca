@@ -16,6 +16,87 @@
   const activeEvent = () => DB.events.find(e => e.id === S.activeEventId) || DB.events[0];
   const pick = t => DB.pickLists[t].filter(v => v.active);
 
+  /* ---------- persistence (localStorage) ---------- */
+  const STORE_KEY = 'bizca-state-v1';
+  function saveState() {
+    try {
+      const snap = {
+        leads: DB.leads, pickLists: DB.pickLists, events: DB.events,
+        assignmentRules: DB.assignmentRules, users: DB.users, destinations: DB.destinations,
+        fallbackOwner: DB.fallbackOwner, allowOverride: DB.allowOverride, autoSend: DB.autoSend,
+        syncLog: DB.syncLog.slice(0, 300),
+        session: { activeEventId: S.activeEventId, userId: S.user ? S.user.id : null }
+      };
+      try {
+        localStorage.setItem(STORE_KEY, JSON.stringify(snap));
+      } catch (quota) {
+        // Storage full — drop card images oldest-first, then retry
+        const clone = JSON.parse(JSON.stringify(snap));
+        clone.leads.sort((a, b) => a.ts - b.ts);
+        for (const l of clone.leads) {
+          if (l.image) {
+            l.image = null;
+            try { localStorage.setItem(STORE_KEY, JSON.stringify(clone)); return; } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      ['leads','pickLists','events','assignmentRules','users','destinations','syncLog'].forEach(k => { if (d[k]) DB[k] = d[k]; });
+      ['fallbackOwner','allowOverride','autoSend'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
+      if (d.session) {
+        if (d.session.activeEventId) S.activeEventId = d.session.activeEventId;
+        if (d.session.userId) { const u = DB.users.find(x => x.id === d.session.userId); if (u) S.user = u; }
+      }
+    } catch (e) {}
+  }
+  function resetState() { try { localStorage.removeItem(STORE_KEY); } catch (e) {} location.hash = '#/login'; location.reload(); }
+
+  /* ---------- connectivity & install ---------- */
+  let deferredPrompt = null;
+  window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredPrompt = e; if (window.render) render(); });
+  window.addEventListener('online', () => { S.online = true; if (window.render) render(); flushQueued(); });
+  window.addEventListener('offline', () => { S.online = false; if (window.render) render(); });
+  S.online = (navigator.onLine !== false);
+
+  /* ---------- delivery (Brevo real · Excel simulated) ---------- */
+  async function pushToBrevo(l) {
+    const ownerName = userName(l.ownerId);
+    const evName = (DB.events.find(e => e.id === l.eventId) || {}).name || '';
+    try {
+      const res = await fetch('/api/send-brevo', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lead: {
+          first: l.first, last: l.last, company: l.company, role: l.role, email: l.email,
+          phone: l.phone, website: l.website, address: l.address,
+          provenienza: l.provenienza, country: l.country, interesse: l.interesse, event: evName, owner: ownerName
+        } })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) return { ok: true, action: data.action };
+      return { ok: false, msg: data.error || ('Brevo error ' + res.status) };
+    } catch (e) { return { ok: false, msg: e.message }; }
+  }
+  async function deliverLead(l) {
+    const r = await pushToBrevo(l);
+    DB.syncLog.unshift({ leadId: l.id, dest: 'Brevo', ok: r.ok, ts: Date.now(), msg: r.ok ? (r.action === 'updated' ? 'Contact updated (dedupe by email)' : 'Contact created') : r.msg });
+    DB.syncLog.unshift({ leadId: l.id, dest: 'Excel', ok: true, ts: Date.now(), msg: 'Row added (simulated — Graph not configured)' });
+    if (r.ok) { l.status = 'Sent'; l.error = null; l.queuedOffline = false; }
+    else { l.status = 'Error'; l.error = 'Brevo: ' + r.msg; }
+    return r.ok;
+  }
+  async function flushQueued() {
+    const q = DB.leads.filter(l => l.queuedOffline && (l.status === 'Ready' || l.status === 'Error'));
+    if (!q.length) return;
+    for (const l of q) { await deliverLead(l); }
+    saveState(); toast(q.length + ' queued lead(s) synced', 'ok'); if (window.render) render();
+  }
+
   function toast(msg, kind) {
     const t = document.getElementById('toast');
     t.className = ''; t.innerHTML = (kind === 'ok' ? ic.check : kind === 'err' ? ic.alert : '') + '<span>' + esc(msg) + '</span>';
@@ -94,6 +175,7 @@
       (opts.fab ? '<button class="fab" data-nav="#/scan">' + ic.camera + '</button>' : '');
     bindCommon();
     if (opts.bind) opts.bind();
+    saveState();
   }
 
   function tabbar(active) {
@@ -145,6 +227,8 @@
     const drafts = mine.filter(l => l.status === 'Captured' || l.status === 'To finalize').length;
     const ready = mine.filter(l => l.status === 'Ready').length;
     const body =
+      (deferredPrompt ? '<button class="btn soft" id="installApp" style="margin-bottom:12px">' + ic.plus + ' Install Bizca on your device</button>' : '') +
+      (S.online ? '' : '<div class="banner offline-tag" style="background:#FEF3C7;border-color:#FDE68A;color:#92400E">' + ic.info + '<div>You are offline. Captures and sends are queued and will sync automatically when you are back online.</div></div>') +
       '<div class="banner">' + ic.info + '<div>Active event applies presets to every card you scan. Switch it anytime.</div></div>' +
       '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
         '<div class="section-title" style="margin:0 0 6px">Active event</div>' +
@@ -165,7 +249,11 @@
         stat(mine.filter(l=>l.status==='Sent').length, 'Sent', 'g') +
       '</div>';
     shell('Hi, ' + user().name.split(' ')[0], DB.company.name + ' · ' + (isAdmin()?'Admin':'Seller'), body, '#/home', { brand:true, right:'<button class="iconbtn" id="logout" title="Sign out">'+ic.chevR+'</button>',
-      bind(){ $('#switchEv').onclick = eventPicker; $('#logout').onclick = () => { S.user=null; go('#/login'); }; }});
+      bind(){
+        $('#switchEv').onclick = eventPicker;
+        $('#logout').onclick = () => { S.user=null; saveState(); go('#/login'); };
+        const inst = $('#installApp'); if (inst) inst.onclick = async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); try { await deferredPrompt.userChoice; } catch(e){} deferredPrompt = null; render(); };
+      }});
   }
   const presetSummary = ev => ['provenienza','country','interesse'].map(k => ev.preset[k]).filter(Boolean).join(' · ') || 'no presets';
   const stat = (n,l,c) => '<div class="stat"><div class="num '+(c||'')+'">'+n+'</div><div class="lbl">'+esc(l)+'</div></div>';
@@ -243,8 +331,7 @@
       if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
       finishScan(data, dataURL, true);
     } catch (e) {
-      const c = DB.sampleCards[scanIndex % DB.sampleCards.length]; scanIndex++;
-      finishScan(c, dataURL, false, e.message);
+      finishScan({}, dataURL, false, e.message);
     }
   }
 
@@ -255,13 +342,14 @@
       id: 'l' + Date.now(),
       first: d.first || '', last: d.last || '', company: d.company || '', role: d.role || '',
       email: d.email || '', phone: d.phone || '', website: d.website || '', address: d.address || '',
-      provenienza: ev.preset.provenienza || '', country: ev.preset.country || d.country || '', interesse: ev.preset.interesse || '',
+      provenienza: ev.preset.provenienza || '', country: d.country || ev.preset.country || '', interesse: ev.preset.interesse || '',
       eventId: ev.id, ownerId: null, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
     };
     if (lead.country && lead.interesse) lead.ownerId = assign(lead.country, lead.interesse).owner;
     DB.leads.unshift(lead);
+    saveState();
     if (isReal) toast('Card read with AI', 'ok');
-    else toast('AI unavailable — demo data used', 'err');
+    else toast('AI could not read the card — fill fields manually' + (errMsg ? ' (' + errMsg + ')' : ''), 'err');
     if (batchMode) scanScreen();
     else go('#/lead?id=' + lead.id);
   }
@@ -325,15 +413,15 @@
   }
   function optList(arr, sel) { return '<option value="">— select —</option>' + arr.map(v => '<option '+(v===sel?'selected':'')+'>'+esc(v)+'</option>').join(''); }
 
-  function sendLead(l) {
+  async function sendLead(l) {
     if (!requiredFilled(l)) { toast('Fill all required qualification fields', 'err'); return; }
-    if (!S.online) { l.status = 'Ready'; toast('Offline — queued, will sync automatically', ''); go('#/leads'); return; }
+    if (!S.online) { l.status = 'Ready'; l.queuedOffline = true; saveState(); toast('Offline — queued, will sync automatically', ''); go('#/leads'); return; }
     const btn = $('#send'); if (btn){ btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Sending…'; }
-    setTimeout(() => {
-      l.status = 'Sent'; l.error = null;
-      DB.destinations.filter(d=>d.status==='connected').forEach(d => DB.syncLog.unshift({ leadId:l.id, dest: d.type==='brevo'?'Brevo':'Excel', ok:true, ts:Date.now(), msg: d.type==='brevo'?'Contact upserted (dedupe by email)':'Row added to table' }));
-      toast('Sent to Brevo + Excel', 'ok'); go('#/leads');
-    }, 1400);
+    const ok = await deliverLead(l);
+    saveState();
+    if (ok) toast('Sent to Brevo (+ Excel simulated)', 'ok');
+    else toast('Brevo send failed — see details', 'err');
+    go('#/leads');
   }
   function syncLogCard(l) {
     const logs = DB.syncLog.filter(s => s.leadId === l.id);
@@ -388,12 +476,15 @@
       app.querySelectorAll('[data-open]').forEach(m => m.onclick = () => go('#/lead?id=' + m.getAttribute('data-open')));
       const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); q.forEach(l=>{ if(ev.preset.provenienza)l.provenienza=ev.preset.provenienza; if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(requiredFilled(l)){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; l.status='Ready';} }); toast('Preset applied to queue','ok'); batchScreen(); };
       const aa=$('#autoAssign'); if(aa) aa.onclick = () => { let n=0; q.forEach(l=>{ if(l.country&&l.interesse){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; if(requiredFilled(l))l.status='Ready'; n++;} }); toast(n+' lead(s) assigned','ok'); batchScreen(); };
-      const ss=$('#sendSel'); if(ss) ss.onclick = () => {
+      const ss=$('#sendSel'); if(ss) ss.onclick = async () => {
         if(!batchSel.size){ toast('Select at least one lead','err'); return; }
-        let sent=0, skip=0;
-        batchSel.forEach(id=>{ const l=DB.leads.find(x=>x.id===id); if(l&&requiredFilled(l)){ l.status='Sent'; DB.destinations.filter(d=>d.status==='connected').forEach(d=>DB.syncLog.unshift({leadId:l.id,dest:d.type==='brevo'?'Brevo':'Excel',ok:true,ts:Date.now(),msg:'Batch send'})); sent++; } else skip++; });
-        batchSel.clear();
-        toast(sent+' sent'+(skip?', '+skip+' skipped (incomplete)':''), skip?'':'ok'); batchScreen();
+        if(!S.online){ let q2=0; batchSel.forEach(id=>{ const l=DB.leads.find(x=>x.id===id); if(l&&requiredFilled(l)){ l.status='Ready'; l.queuedOffline=true; q2++; } }); batchSel.clear(); saveState(); toast(q2+' queued (offline) — will sync','' ); batchScreen(); return; }
+        ss.disabled=true; ss.innerHTML='<div class="spinner"></div> Sending…';
+        let sent=0, fail=0, skip=0;
+        const ids=Array.from(batchSel);
+        for(const id of ids){ const l=DB.leads.find(x=>x.id===id); if(!l){continue;} if(!requiredFilled(l)){ skip++; continue; } const ok=await deliverLead(l); ok?sent++:fail++; }
+        batchSel.clear(); saveState();
+        toast(sent+' sent'+(fail?', '+fail+' failed':'')+(skip?', '+skip+' skipped (incomplete)':''), fail?'err':'ok'); batchScreen();
       };
     }});
   }
@@ -443,8 +534,13 @@
       ['Events', DB.events.length+' events', '#/admin/events', ic.home]
     ];
     const body = '<div class="banner">'+ic.info+'<div>Tenant configuration for '+esc(DB.company.name)+'. Multi-tenant ready — each company is isolated.</div></div>' +
-      rows.map(r => '<button class="rowbtn" data-nav="'+r[2]+'"><div class="lead-ic">'+r[3]+'</div><div style="flex:1"><div style="font-weight:600">'+esc(r[0])+'</div><div class="hint" style="margin:0">'+esc(r[1])+'</div></div>'+ic.chevR+'</button>').join('');
-    shell('Admin', DB.company.name+' tenant', body, '#/admin');
+      rows.map(r => '<button class="rowbtn" data-nav="'+r[2]+'"><div class="lead-ic">'+r[3]+'</div><div style="flex:1"><div style="font-weight:600">'+esc(r[0])+'</div><div class="hint" style="margin:0">'+esc(r[1])+'</div></div>'+ic.chevR+'</button>').join('') +
+      '<div class="section-title">Data</div>' +
+      '<button class="btn danger" id="resetDemo">Reset demo data</button>' +
+      '<p class="hint" style="text-align:center;margin-top:8px">Clears locally-saved leads and configuration and restores the demo seed.</p>';
+    shell('Admin', DB.company.name+' tenant', body, '#/admin', { bind(){
+      $('#resetDemo').onclick = () => modal('<h3>Reset demo data?</h3><p class="hint">This clears all locally-saved leads and settings on this device and reloads the seed data. It does not affect Brevo.</p><button class="btn danger" id="doReset">Yes, reset</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const b=document.getElementById('doReset'); if(b) b.onclick=resetState; },0);
+    }});
   }
 
   function adminTeam() {
@@ -480,9 +576,12 @@
   }
 
   function adminDest() {
-    const body = DB.destinations.map(d => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(d.label)+'</h3><span class="pill green">'+ic.check+' connected</span></div><p class="hint" style="margin:6px 0 0">'+esc(d.detail)+'</p></div>').join('') +
+    const badge = d => d.type === 'brevo'
+      ? '<span class="pill green">' + ic.check + ' live</span>'
+      : '<span class="pill amber">simulated</span>';
+    const body = DB.destinations.map(d => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(d.label)+'</h3>'+badge(d)+'</div><p class="hint" style="margin:6px 0 0">'+esc(d.detail)+'</p></div>').join('') +
       '<div class="card"><h3>Sending</h3><div class="kv" style="border:none"><span class="k">Auto-send when lead is Ready</span><div class="switch '+(DB.autoSend?'on':'')+'" id="auto"></div></div></div>' +
-      '<div class="banner">'+ic.info+'<div>Field mapping: source, country, interest, event, owner → Brevo custom attributes and Excel columns. Dedupe by email.</div></div>';
+      '<div class="banner">'+ic.info+'<div>Brevo is connected via a server-side API key (Vercel env). Excel on SharePoint is simulated until a Microsoft Graph / Azure AD app is configured with admin consent.</div></div>';
     shell('Destinations', 'Brevo + Excel', body, null, { back:'#/admin', bind(){
       $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; toast('Auto-send '+(DB.autoSend?'on':'off'),'ok'); adminDest(); };
     }});
@@ -522,5 +621,8 @@
   }
   window.render = render;
   window.addEventListener('hashchange', render);
+
+  loadState();
+  if (S.user && (!location.hash || location.hash === '#/login' || location.hash === '#/')) location.hash = '#/home';
   render();
 })();

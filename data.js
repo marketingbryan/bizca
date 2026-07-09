@@ -50,8 +50,8 @@ window.DB = {
   allowOverride: true,
 
   destinations: [
-    { id: 'd_brevo', type: 'brevo', label: 'Brevo (VID CRM)', status: 'connected', detail: 'List: Event Leads · 5 custom attributes mapped' },
-    { id: 'd_excel', type: 'excel', label: 'Excel — SharePoint', status: 'connected', detail: 'VID Sales / Leads.xlsx · table "Leads"' }
+    { id: 'd_brevo', type: 'brevo', label: 'Brevo (VID CRM)', status: 'connected', detail: 'Server-side API key (Vercel env) · create/update contact, dedupe by email, BIZCA_* attributes' },
+    { id: 'd_excel', type: 'excel', label: 'Excel — SharePoint', status: 'simulated', detail: 'Simulated — needs Microsoft Graph / Azure AD app with admin consent' }
   ],
   autoSend: true,
 
