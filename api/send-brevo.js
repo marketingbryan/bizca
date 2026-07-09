@@ -38,9 +38,11 @@ module.exports = async (req, res) => {
     const email = (lead.email || '').trim();
     if (!email) { res.status(400).json({ error: 'Lead has no email — Brevo requires an email address' }); return; }
 
-    // Optional destination list (set BREVO_LIST_ID in Vercel env to route contacts into a Brevo list)
-    const listEnv = parseInt(process.env.BREVO_LIST_ID || '', 10);
-    const listIds = Number.isFinite(listEnv) ? [listEnv] : undefined;
+    // Destination list: per-request listId (from the lead's event) wins, else BREVO_LIST_ID env
+    const bodyListId = parseInt(body.listId, 10);
+    const envListId = parseInt(process.env.BREVO_LIST_ID || '', 10);
+    const chosen = Number.isFinite(bodyListId) ? bodyListId : (Number.isFinite(envListId) ? envListId : undefined);
+    const listIds = chosen !== undefined ? [chosen] : undefined;
 
     // Full attribute set: standard + Bizca custom attributes
     const full = {
