@@ -5,6 +5,18 @@ module.exports = async (req, res) => {
   const key = process.env.BREVO_API_KEY;
   if (!key) { res.status(500).json({ error: 'BREVO_API_KEY not configured on the server' }); return; }
   try {
+    // Optional: ?email=... returns that contact's list membership (for verification)
+    const q = new URL(req.url, 'http://localhost').searchParams;
+    const email = q.get('email');
+    if (email) {
+      const cr = await fetch('https://api.brevo.com/v3/contacts/' + encodeURIComponent(email), {
+        headers: { 'api-key': key, accept: 'application/json' }
+      });
+      const cd = await cr.json();
+      if (!cr.ok) { res.status(cr.status).json({ error: (cd && cd.message) || 'Contact not found' }); return; }
+      res.status(200).json({ email: cd.email, listIds: cd.listIds || [], attributes: cd.attributes || {} });
+      return;
+    }
     const r = await fetch('https://api.brevo.com/v3/contacts/lists?limit=50&sort=desc', {
       headers: { 'api-key': key, accept: 'application/json' }
     });
