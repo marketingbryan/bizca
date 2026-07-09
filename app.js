@@ -594,9 +594,21 @@
       : '<span class="pill amber">simulated</span>';
     const body = DB.destinations.map(d => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(d.label)+'</h3>'+badge(d)+'</div><p class="hint" style="margin:6px 0 0">'+esc(d.detail)+'</p></div>').join('') +
       '<div class="card"><h3>Sending</h3><div class="kv" style="border:none"><span class="k">Auto-send when lead is Ready</span><div class="switch '+(DB.autoSend?'on':'')+'" id="auto"></div></div></div>' +
-      '<div class="banner">'+ic.info+'<div>Brevo is connected via a server-side API key (Vercel env). Excel on SharePoint is simulated until a Microsoft Graph / Azure AD app is configured with admin consent.</div></div>';
+      '<div class="card"><h3>Brevo attributes</h3><p class="hint">Create the contact fields Bizca maps to (name, company, source, country, interest, event, owner…) in your Brevo account. Run once.</p><button class="btn soft" id="brevoSetup">Prepare Brevo attributes</button></div>' +
+      '<div class="banner">'+ic.info+'<div>Brevo is connected via a server-side API key (Vercel env). Leads route into the Brevo list set per event. Excel on SharePoint is simulated until a Microsoft Graph / Azure AD app is configured with admin consent.</div></div>';
     shell('Destinations', 'Brevo + Excel', body, null, { back:'#/admin', bind(){
       $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; toast('Auto-send '+(DB.autoSend?'on':'off'),'ok'); adminDest(); };
+      const bs = $('#brevoSetup'); if (bs) bs.onclick = async () => {
+        bs.disabled = true; bs.innerHTML = '<div class="spinner"></div> Preparing…';
+        try {
+          const r = await fetch('/api/brevo-setup', { method: 'POST' });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+          const done = (d.created||[]).length, had = (d.existed||[]).length, bad = (d.failed||[]).length;
+          toast(done + ' created, ' + had + ' already existed' + (bad ? ', ' + bad + ' failed' : ''), bad ? 'err' : 'ok');
+        } catch (e) { toast('Setup failed: ' + e.message, 'err'); }
+        adminDest();
+      };
     }});
   }
 
