@@ -67,11 +67,12 @@
   /* ---------- delivery (Brevo real · Excel simulated) ---------- */
   async function pushToBrevo(l) {
     const ownerName = userName(l.ownerId);
-    const evName = (DB.events.find(e => e.id === l.eventId) || {}).name || '';
+    const ev = DB.events.find(e => e.id === l.eventId) || {};
+    const evName = ev.name || '';
     try {
       const res = await fetch('/api/send-brevo', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lead: {
+        body: JSON.stringify({ listId: ev.brevoListId || undefined, lead: {
           first: l.first, last: l.last, company: l.company, role: l.role, email: l.email,
           phone: l.phone, website: l.website, address: l.address,
           provenienza: l.provenienza, country: l.country, interesse: l.interesse, event: evName, owner: ownerName
@@ -95,6 +96,18 @@
     if (!q.length) return;
     for (const l of q) { await deliverLead(l); }
     saveState(); toast(q.length + ' queued lead(s) synced', 'ok'); if (window.render) render();
+  }
+
+  // Brevo lists (for per-event routing config in Admin)
+  let brevoLists = null;
+  async function loadBrevoLists(force) {
+    if (brevoLists && !force) return brevoLists;
+    try {
+      const r = await fetch('/api/brevo-lists');
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && Array.isArray(d.lists)) { brevoLists = d.lists; return brevoLists; }
+    } catch (e) {}
+    return null;
   }
 
   function toast(msg, kind) {
@@ -588,10 +601,24 @@
   }
 
   function adminEvents() {
-    const body = DB.events.map(e => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(e.name)+'</h3><span class="pill '+(e.status==='open'?'green':'gray')+'">'+esc(e.status)+'</span></div><p class="hint" style="margin:6px 0 0">'+esc(e.dates)+'</p><div class="tags" style="margin-top:8px">'+['provenienza','country','interesse'].map(k=>e.preset[k]?'<span class="pill indigo">'+esc(e.preset[k])+'</span>':'').join('')+'</div></div>').join('') +
+    const lists = brevoLists;
+    const listName = id => { if (!id) return null; const x = (lists || []).find(l => l.id === id); return x ? x.name : ('list #' + id); };
+    const listSelect = e => {
+      if (!lists) return '<p class="hint" style="margin:10px 0 0">Loading Brevo lists…</p>';
+      return '<div class="field" style="margin:10px 0 0"><label>Brevo destination list</label><select class="input" data-evlist="'+e.id+'"><option value="">— none —</option>' +
+        lists.map(l => '<option value="'+l.id+'" '+(e.brevoListId===l.id?'selected':'')+'>'+esc(l.name)+' (#'+l.id+')</option>').join('') + '</select></div>';
+    };
+    const body = DB.events.map(e => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(e.name)+'</h3><span class="pill '+(e.status==='open'?'green':'gray')+'">'+esc(e.status)+'</span></div>' +
+      '<p class="hint" style="margin:6px 0 0">'+esc(e.dates)+'</p>' +
+      '<div class="tags" style="margin-top:8px">'+['provenienza','country','interesse'].map(k=>e.preset[k]?'<span class="pill indigo">'+esc(e.preset[k])+'</span>':'').join('')+'</div>' +
+      (e.brevoListId ? '<div class="tags" style="margin-top:6px"><span class="pill green">'+ic.send+' Brevo: '+esc(listName(e.brevoListId))+'</span></div>' : '') +
+      listSelect(e) +
+      '</div>').join('') +
       '<button class="btn primary" id="newEv">'+ic.plus+' New event</button>';
-    shell('Events', 'Presets per event', body, null, { back:'#/admin', bind(){
-      $('#newEv').onclick = () => modal('<h3>New event</h3><div class="field"><label>Name</label><input class="input" id="evn" placeholder="Trade show 2026"></div><div class="field"><label>Dates</label><input class="input" id="evd" placeholder="Sep 1–3, 2026"></div><button class="btn primary" id="evAdd">Create</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const a=document.getElementById('evAdd'); if(a) a.onclick=()=>{ DB.events.push({id:'e'+Date.now(),name:document.getElementById('evn').value||'New event',dates:document.getElementById('evd').value||'',status:'open',preset:{provenienza:'',country:'',interesse:''}}); closeModal(); toast('Event created','ok'); adminEvents(); }; },0);
+    shell('Events', 'Presets & Brevo list per event', body, null, { back:'#/admin', bind(){
+      if (!lists) loadBrevoLists().then(r => { if (r && location.hash.indexOf('#/admin/events') === 0) adminEvents(); });
+      app.querySelectorAll('[data-evlist]').forEach(sel => sel.onchange = () => { const e=DB.events.find(x=>x.id===sel.getAttribute('data-evlist')); e.brevoListId = sel.value ? parseInt(sel.value,10) : null; saveState(); toast(e.brevoListId?('Routing to '+listName(e.brevoListId)):'List cleared','ok'); adminEvents(); });
+      $('#newEv').onclick = () => modal('<h3>New event</h3><div class="field"><label>Name</label><input class="input" id="evn" placeholder="Trade show 2026"></div><div class="field"><label>Dates</label><input class="input" id="evd" placeholder="Sep 1–3, 2026"></div><button class="btn primary" id="evAdd">Create</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const a=document.getElementById('evAdd'); if(a) a.onclick=()=>{ DB.events.push({id:'e'+Date.now(),name:document.getElementById('evn').value||'New event',dates:document.getElementById('evd').value||'',status:'open',preset:{provenienza:'',country:'',interesse:''},brevoListId:null}); closeModal(); toast('Event created','ok'); adminEvents(); }; },0);
     }});
   }
 
