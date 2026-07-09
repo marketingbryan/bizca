@@ -10,11 +10,13 @@ function readRaw(req) {
   });
 }
 
-async function brevoUpsert(key, email, attributes) {
+async function brevoUpsert(key, email, attributes, listIds) {
+  const payload = { email, attributes, updateEnabled: true };
+  if (listIds && listIds.length) payload.listIds = listIds;
   const r = await fetch('https://api.brevo.com/v3/contacts', {
     method: 'POST',
     headers: { 'api-key': key, 'Content-Type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ email, attributes, updateEnabled: true })
+    body: JSON.stringify(payload)
   });
   // 201 = created, 204 = updated (dedupe by email handled by Brevo)
   if (r.status === 201) return { ok: true, action: 'created' };
@@ -36,6 +38,10 @@ module.exports = async (req, res) => {
     const email = (lead.email || '').trim();
     if (!email) { res.status(400).json({ error: 'Lead has no email — Brevo requires an email address' }); return; }
 
+    // Optional destination list (set BREVO_LIST_ID in Vercel env to route contacts into a Brevo list)
+    const listEnv = parseInt(process.env.BREVO_LIST_ID || '', 10);
+    const listIds = Number.isFinite(listEnv) ? [listEnv] : undefined;
+
     // Full attribute set: standard + Bizca custom attributes
     const full = {
       FIRSTNAME: lead.first || '',
@@ -52,12 +58,12 @@ module.exports = async (req, res) => {
       BIZCA_OWNER: lead.owner || ''
     };
 
-    let result = await brevoUpsert(key, email, full);
+    let result = await brevoUpsert(key, email, full, listIds);
 
     // If custom attributes aren't defined in this Brevo account, retry with standard-only
     if (!result.ok && result.status === 400) {
       const minimal = { FIRSTNAME: lead.first || '', LASTNAME: lead.last || '' };
-      const retry = await brevoUpsert(key, email, minimal);
+      const retry = await brevoUpsert(key, email, minimal, listIds);
       if (retry.ok) { res.status(200).json({ ok: true, action: retry.action, note: 'custom attributes skipped — define BIZCA_* in Brevo to store qualification data' }); return; }
       res.status(retry.status || 400).json({ error: retry.message });
       return;
