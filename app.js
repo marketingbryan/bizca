@@ -34,8 +34,8 @@
         const clone = JSON.parse(JSON.stringify(snap));
         clone.leads.sort((a, b) => a.ts - b.ts);
         for (const l of clone.leads) {
-          if (l.image) {
-            l.image = null;
+          if (l.image || l.consentSignature) {
+            l.image = null; l.consentSignature = null;
             try { localStorage.setItem(STORE_KEY, JSON.stringify(clone)); return; } catch (e) {}
           }
         }
@@ -72,10 +72,11 @@
     try {
       const res = await fetch('/api/send-brevo', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ listId: ev.brevoListId || undefined, lead: {
+        body: JSON.stringify({ apiKey: DB.brevoApiKey || undefined, listId: ev.brevoListId || undefined, lead: {
           first: l.first, last: l.last, company: l.company, role: l.role, email: l.email,
           phone: l.phone, website: l.website, address: l.address,
-          provenienza: l.provenienza, country: l.country, interesse: l.interesse, event: evName, owner: ownerName
+          provenienza: l.provenienza, country: l.country, interesse: l.interesse, event: evName, owner: ownerName,
+          consent: l.consentAt ? new Date(l.consentAt).toISOString().slice(0, 10) : ''
         } })
       });
       const data = await res.json().catch(() => ({}));
@@ -103,7 +104,7 @@
   async function loadBrevoLists(force) {
     if (brevoLists && !force) return brevoLists;
     try {
-      const r = await fetch('/api/brevo-lists');
+      const r = await fetch('/api/brevo-lists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: DB.brevoApiKey || undefined }) });
       const d = await r.json().catch(() => ({}));
       if (r.ok && Array.isArray(d.lists)) { brevoLists = d.lists; return brevoLists; }
     } catch (e) {}
@@ -212,25 +213,25 @@
   function loginScreen() {
     app.innerHTML =
       '<div class="login">' +
-        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Event Leads to CRM · VID</p></div>' +
+        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Event Leads to CRM · ' + esc(DB.company.name) + '</p></div>' +
         '<div class="card" style="box-shadow:var(--shadow-lg)">' +
           '<button class="ms-btn" id="sso">' + ic.ms + 'Sign in with Microsoft</button>' +
           '<div class="divider">or</div>' +
-          '<div class="field"><label>Email</label><input class="input" id="email" value="you@vid.example"></div>' +
-          '<div class="field"><label>Password</label><input class="input" type="password" id="pwd" value="demo1234"></div>' +
+          '<div class="field"><label>Work email</label><input class="input" id="email" type="email" placeholder="name@' + esc(DB.company.domain) + '" autocomplete="username"></div>' +
+          '<div class="field"><label>Password</label><input class="input" id="pwd" type="password" placeholder="••••••••" autocomplete="current-password"></div>' +
           '<button class="btn primary" id="login">Sign in</button>' +
-          '<p class="hint" style="text-align:center;margin:14px 0 0">Prototype — pick a role to explore</p>' +
-          '<div class="btnrow" style="margin-top:8px">' +
-            '<button class="btn ghost sm" id="asSeller" style="flex:1">Enter as Seller</button>' +
-            '<button class="btn ghost sm" id="asAdmin" style="flex:1">Enter as Admin</button>' +
-          '</div>' +
         '</div>' +
       '</div>';
-    const enter = role => { S.user = role === 'admin' ? DB.users.find(u=>u.id==='u_admin') : DB.users.find(u=>u.id==='u_you'); go('#/home'); };
-    $('#sso').onclick = () => { toast('Microsoft 365 SSO (mock)'); setTimeout(()=>enter('seller'),500); };
-    $('#login').onclick = () => enter('seller');
-    $('#asSeller').onclick = () => enter('seller');
-    $('#asAdmin').onclick = () => enter('admin');
+    const signInEmail = () => {
+      const email = ($('#email').value || '').trim().toLowerCase();
+      if (!email) { toast('Enter your work email', 'err'); return; }
+      const u = DB.users.find(x => x.email.toLowerCase() === email && x.status === 'active');
+      if (!u) { toast('Account not found — ask your admin to invite you', 'err'); return; }
+      S.user = u; saveState(); go('#/home');
+    };
+    $('#sso').onclick = () => toast('Microsoft SSO is enabled once your IT completes the Azure AD setup');
+    $('#login').onclick = signInEmail;
+    $('#pwd').addEventListener('keydown', e => { if (e.key === 'Enter') signInEmail(); });
   }
 
   /* ---------- Home ---------- */
@@ -286,7 +287,7 @@
           '<div><h3 style="margin:0">Scan card</h3><p class="hint" style="margin:0">Event: ' + esc(activeEvent().name) + '</p></div>' +
           '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:13px;font-weight:600;color:var(--slate)">Batch</span><div class="switch ' + (batchMode?'on':'') + '" id="batchToggle"></div></div>' +
         '</div>' +
-        '<div class="scanview" id="scanview"><div class="frame"></div><div class="card-demo"><div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><div style="width:26px;height:26px;border-radius:50%;background:#C7D2FE"></div><div><div style="width:80px;height:8px;background:#4F46E5;border-radius:4px"></div><div style="width:54px;height:6px;background:#A5B4FC;border-radius:3px;margin-top:5px"></div></div></div><div style="width:100%;height:6px;background:#CBD5E1;border-radius:3px"></div></div></div>' +
+        '<div class="scanview" id="scanview"><div class="frame"></div><div style="text-align:center;color:#94A3B8"><div style="width:46px;height:46px;margin:0 auto;color:#CBD5E1">' + ic.camera + '</div><div style="font-size:13px;margin-top:10px">Point at a business card</div></div></div>' +
         '<p class="hint" style="text-align:center;margin:12px 0">' + (batchMode ? 'Batch mode: shoot several cards in a row.' : 'Single mode: capture, then finalize now.') + '</p>' +
         '<button class="btn primary" id="capture">' + ic.camera + ' Capture card</button>' +
         '<button class="btn ghost" id="gallery" style="margin-top:10px">Choose from gallery</button>' +
@@ -406,9 +407,11 @@
         (DB.allowOverride && !readOnly ? '<p class="hint" style="margin:6px 0 0">You can override the suggested owner.</p>' : '') + '</div>' +
       '</div>' +
 
+      consentCard(l, readOnly) +
+
       (readOnly ? syncLogCard(l) :
         '<div class="btnrow"><button class="btn ghost" id="saveDraft">Save draft</button>' +
-        '<button class="btn primary" id="send">' + ic.send + ' ' + (l.status==='Error'?'Retry send':'Send to Brevo + Excel') + '</button></div>' +
+        '<button class="btn primary" id="send">' + ic.send + ' ' + (l.status==='Error'?'Retry send':'Send to Brevo') + '</button></div>' +
         '<p class="hint" style="text-align:center;margin-top:10px">Destinations: Brevo (CRM) + Excel on SharePoint · auto-dedupe by email</p>');
 
     shell('Lead', l.company||'', body, null, { back: history.length>1 ? null : '#/leads', right:'<button class="back" data-nav="#/leads">'+ic.chevL+'Leads</button>', bind(){
@@ -420,14 +423,57 @@
         $('#ruleHint').textContent = ruleSummary(assign(l.country, l.interesse).rule);
       });
       const ow = app.querySelector('[data-owner]'); if (ow) ow.onchange = () => { l.ownerId = ow.value; l.override = true; };
-      const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; toast('Draft saved','ok'); go('#/leads'); };
+      const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; saveState(); toast('Draft saved','ok'); go('#/leads'); };
       const sb = $('#send'); if (sb) sb.onclick = () => sendLead(l);
+      const rs = $('#reSign'); if (rs) rs.onclick = () => { l.consentSignature = null; l.consentAt = null; saveState(); leadScreen(l.id); };
+      initSigPad(l);
     }});
+  }
+
+  function consentCard(l, readOnly) {
+    const has = !!l.consentAt;
+    const when = has ? new Date(l.consentAt).toLocaleString() : '';
+    if (readOnly) {
+      return '<div class="card"><h3>Consent</h3>' + (has
+        ? '<div class="tags"><span class="pill green">'+ic.check+' Consent signed</span></div><p class="hint" style="margin:8px 0 0">'+esc(when)+'</p>' + (l.consentSignature ? '<img src="'+l.consentSignature+'" alt="signature" style="margin-top:8px;max-height:90px;border:1px solid var(--line);border-radius:10px;background:#fff">' : '')
+        : '<p class="hint">No consent captured.</p>') + '</div>';
+    }
+    const req = DB.requireConsent;
+    return '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>Consent'+(req?' <span class="req">*</span>':'')+'</h3>'+(has?'<span class="pill green">'+ic.check+' signed</span>':'')+'</div>' +
+      '<p class="hint">The contact agrees to be contacted by '+esc(DB.company.name)+' about the products and services discussed. Sign below.</p>' +
+      (has && l.consentSignature
+        ? '<img src="'+l.consentSignature+'" alt="signature" style="width:100%;max-height:120px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#fff">' +
+          '<button class="btn ghost sm" id="reSign" style="margin-top:10px">Re-sign</button>'
+        : '<canvas id="sigPad" style="width:100%;height:150px;border:1.5px dashed var(--line);border-radius:12px;background:#fff;touch-action:none"></canvas>' +
+          '<div class="btnrow" style="margin-top:10px"><button class="btn ghost sm" id="sigClear">Clear</button><button class="btn soft sm" id="sigSave">Save signature</button></div>') +
+      (has ? '<p class="hint" style="margin:8px 0 0">Signed '+esc(when)+'</p>' : '') +
+      '</div>';
+  }
+
+  function initSigPad(l) {
+    const cv = document.getElementById('sigPad'); if (!cv) return;
+    const ratio = window.devicePixelRatio || 1;
+    const rect = cv.getBoundingClientRect();
+    cv.width = Math.max(1, rect.width * ratio); cv.height = Math.max(1, rect.height * ratio);
+    const ctx = cv.getContext('2d'); if (!ctx) return;
+    ctx.scale(ratio, ratio);
+    ctx.lineWidth = 2.2; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#0F172A';
+    let drawing = false, last = null, dirty = false;
+    const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    cv.addEventListener('pointerdown', e => { e.preventDefault(); drawing = true; last = pt(e); try { cv.setPointerCapture(e.pointerId); } catch (x) {} });
+    cv.addEventListener('pointermove', e => { if (!drawing) return; e.preventDefault(); const p = pt(e); ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke(); last = p; dirty = true; });
+    cv.addEventListener('pointerup', () => { drawing = false; });
+    const clr = $('#sigClear'); if (clr) clr.onclick = () => { ctx.clearRect(0, 0, cv.width, cv.height); dirty = false; };
+    const save = $('#sigSave'); if (save) save.onclick = () => {
+      if (!dirty) { toast('Please sign first', 'err'); return; }
+      l.consentSignature = cv.toDataURL('image/png'); l.consentAt = Date.now(); saveState(); toast('Consent captured', 'ok'); leadScreen(l.id);
+    };
   }
   function optList(arr, sel) { return '<option value="">— select —</option>' + arr.map(v => '<option '+(v===sel?'selected':'')+'>'+esc(v)+'</option>').join(''); }
 
   async function sendLead(l) {
     if (!requiredFilled(l)) { toast('Fill all required qualification fields', 'err'); return; }
+    if (DB.requireConsent && !l.consentAt) { toast('Consent signature required before sending', 'err'); return; }
     if (!S.online) { l.status = 'Ready'; l.queuedOffline = true; saveState(); toast('Offline — queued, will sync automatically', ''); go('#/leads'); return; }
     const btn = $('#send'); if (btn){ btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Sending…'; }
     const ok = await deliverLead(l);
@@ -495,7 +541,7 @@
         ss.disabled=true; ss.innerHTML='<div class="spinner"></div> Sending…';
         let sent=0, fail=0, skip=0;
         const ids=Array.from(batchSel);
-        for(const id of ids){ const l=DB.leads.find(x=>x.id===id); if(!l){continue;} if(!requiredFilled(l)){ skip++; continue; } const ok=await deliverLead(l); ok?sent++:fail++; }
+        for(const id of ids){ const l=DB.leads.find(x=>x.id===id); if(!l){continue;} if(!requiredFilled(l)||(DB.requireConsent&&!l.consentAt)){ skip++; continue; } const ok=await deliverLead(l); ok?sent++:fail++; }
         batchSel.clear(); saveState();
         toast(sent+' sent'+(fail?', '+fail+' failed':'')+(skip?', '+skip+' skipped (incomplete)':''), fail?'err':'ok'); batchScreen();
       };
@@ -549,10 +595,10 @@
     const body = '<div class="banner">'+ic.info+'<div>Tenant configuration for '+esc(DB.company.name)+'. Multi-tenant ready — each company is isolated.</div></div>' +
       rows.map(r => '<button class="rowbtn" data-nav="'+r[2]+'"><div class="lead-ic">'+r[3]+'</div><div style="flex:1"><div style="font-weight:600">'+esc(r[0])+'</div><div class="hint" style="margin:0">'+esc(r[1])+'</div></div>'+ic.chevR+'</button>').join('') +
       '<div class="section-title">Data</div>' +
-      '<button class="btn danger" id="resetDemo">Reset demo data</button>' +
-      '<p class="hint" style="text-align:center;margin-top:8px">Clears locally-saved leads and configuration and restores the demo seed.</p>';
+      '<button class="btn danger" id="resetDemo">Reset app data on this device</button>' +
+      '<p class="hint" style="text-align:center;margin-top:8px">Clears locally-saved leads and configuration on this device. Does not affect Brevo.</p>';
     shell('Admin', DB.company.name+' tenant', body, '#/admin', { bind(){
-      $('#resetDemo').onclick = () => modal('<h3>Reset demo data?</h3><p class="hint">This clears all locally-saved leads and settings on this device and reloads the seed data. It does not affect Brevo.</p><button class="btn danger" id="doReset">Yes, reset</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const b=document.getElementById('doReset'); if(b) b.onclick=resetState; },0);
+      $('#resetDemo').onclick = () => modal('<h3>Reset app data?</h3><p class="hint">This clears all locally-saved leads and settings on this device. It does not affect Brevo.</p><button class="btn danger" id="doReset">Yes, reset</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const b=document.getElementById('doReset'); if(b) b.onclick=resetState; },0);
     }});
   }
 
@@ -592,16 +638,26 @@
     const badge = d => d.type === 'brevo'
       ? '<span class="pill green">' + ic.check + ' live</span>'
       : '<span class="pill amber">simulated</span>';
+    const keyMask = DB.brevoApiKey ? '•••• ' + DB.brevoApiKey.slice(-4) : 'not set — using server default';
     const body = DB.destinations.map(d => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(d.label)+'</h3>'+badge(d)+'</div><p class="hint" style="margin:6px 0 0">'+esc(d.detail)+'</p></div>').join('') +
-      '<div class="card"><h3>Sending</h3><div class="kv" style="border:none"><span class="k">Auto-send when lead is Ready</span><div class="switch '+(DB.autoSend?'on':'')+'" id="auto"></div></div></div>' +
-      '<div class="card"><h3>Brevo attributes</h3><p class="hint">Create the contact fields Bizca maps to (name, company, source, country, interest, event, owner…) in your Brevo account. Run once.</p><button class="btn soft" id="brevoSetup">Prepare Brevo attributes</button></div>' +
-      '<div class="banner">'+ic.info+'<div>Brevo is connected via a server-side API key (Vercel env). Leads route into the Brevo list set per event. Excel on SharePoint is simulated until a Microsoft Graph / Azure AD app is configured with admin consent.</div></div>';
+      '<div class="card"><h3>Brevo account (API key)</h3><p class="hint">The admin sets the Brevo API key here. Change it to point Bizca at a different Brevo account. Current: <b>'+esc(keyMask)+'</b></p>' +
+        '<div class="field" style="margin-bottom:10px"><label>Brevo API key</label><input class="input" id="brevoKey" type="password" placeholder="xkeysib-…" autocomplete="off"></div>' +
+        '<div class="btnrow"><button class="btn soft sm" id="brevoKeySave">Save key</button>' + (DB.brevoApiKey ? '<button class="btn ghost sm" id="brevoKeyClear">Use server default</button>' : '') + '</div>' +
+        '<p class="hint" style="margin:10px 0 0">Stored on this device. For a shared, encrypted store use a server-side secret (recommended for production).</p></div>' +
+      '<div class="card"><h3>Sending & consent</h3>' +
+        '<div class="kv"><span class="k">Auto-send when lead is Ready</span><div class="switch '+(DB.autoSend?'on':'')+'" id="auto"></div></div>' +
+        '<div class="kv" style="border:none"><span class="k">Require consent signature before sending</span><div class="switch '+(DB.requireConsent?'on':'')+'" id="reqConsent"></div></div></div>' +
+      '<div class="card"><h3>Brevo attributes</h3><p class="hint">Create the contact fields Bizca maps to (name, company, source, country, interest, event, owner, consent…) in your Brevo account. Run once per account.</p><button class="btn soft" id="brevoSetup">Prepare Brevo attributes</button></div>' +
+      '<div class="banner">'+ic.info+'<div>Leads route into the Brevo list set per event (Admin → Events). Excel on SharePoint is simulated until a Microsoft Graph / Azure AD app is configured with admin consent.</div></div>';
     shell('Destinations', 'Brevo + Excel', body, null, { back:'#/admin', bind(){
-      $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; toast('Auto-send '+(DB.autoSend?'on':'off'),'ok'); adminDest(); };
+      $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; saveState(); toast('Auto-send '+(DB.autoSend?'on':'off'),'ok'); adminDest(); };
+      $('#reqConsent').onclick = () => { DB.requireConsent=!DB.requireConsent; saveState(); toast('Consent '+(DB.requireConsent?'required':'optional'),'ok'); adminDest(); };
+      const ks = $('#brevoKeySave'); if (ks) ks.onclick = () => { const v=($('#brevoKey').value||'').trim(); if(!v){toast('Enter a key','err');return;} DB.brevoApiKey=v; brevoLists=null; saveState(); toast('Brevo key saved','ok'); adminDest(); };
+      const kc = $('#brevoKeyClear'); if (kc) kc.onclick = () => { DB.brevoApiKey=''; brevoLists=null; saveState(); toast('Using server default key','ok'); adminDest(); };
       const bs = $('#brevoSetup'); if (bs) bs.onclick = async () => {
         bs.disabled = true; bs.innerHTML = '<div class="spinner"></div> Preparing…';
         try {
-          const r = await fetch('/api/brevo-setup', { method: 'POST' });
+          const r = await fetch('/api/brevo-setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: DB.brevoApiKey || undefined }) });
           const d = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
           const done = (d.created||[]).length, had = (d.existed||[]).length, bad = (d.failed||[]).length;
