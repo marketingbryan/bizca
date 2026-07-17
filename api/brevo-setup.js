@@ -4,12 +4,18 @@
 const ATTRS = [
   'FIRSTNAME', 'LASTNAME',
   'BIZCA_COMPANY', 'BIZCA_ROLE', 'BIZCA_PHONE', 'BIZCA_WEBSITE', 'BIZCA_ADDRESS',
-  'BIZCA_SOURCE', 'BIZCA_COUNTRY', 'BIZCA_INTEREST', 'BIZCA_EVENT', 'BIZCA_OWNER'
+  'BIZCA_SOURCE', 'BIZCA_COUNTRY', 'BIZCA_INTEREST', 'BIZCA_EVENT', 'BIZCA_OWNER', 'BIZCA_CONSENT'
 ];
 
+function readRaw(req) {
+  return new Promise((resolve, reject) => { let d = ''; req.on('data', c => (d += c)); req.on('end', () => resolve(d)); req.on('error', reject); });
+}
+
 module.exports = async (req, res) => {
-  const key = process.env.BREVO_API_KEY;
-  if (!key) { res.status(500).json({ error: 'BREVO_API_KEY not configured on the server' }); return; }
+  let body = req.body;
+  if (!body || typeof body === 'string') { try { const raw = await readRaw(req); body = raw ? JSON.parse(raw) : {}; } catch (e) { body = {}; } }
+  const key = (body.apiKey || '').trim() || process.env.BREVO_API_KEY;
+  if (!key) { res.status(500).json({ error: 'No Brevo API key — set it in Admin → Destinations, or as BREVO_API_KEY on the server' }); return; }
 
   const created = [], existed = [], failed = [];
   for (const name of ATTRS) {

@@ -1,13 +1,22 @@
 /* Bizca — list the Brevo account's contact lists (id + name), so an admin can
    pick which list new leads should be routed into (set via BREVO_LIST_ID env). */
 
+function readRaw(req) {
+  return new Promise((resolve, reject) => { let d = ''; req.on('data', c => (d += c)); req.on('end', () => resolve(d)); req.on('error', reject); });
+}
+
 module.exports = async (req, res) => {
-  const key = process.env.BREVO_API_KEY;
-  if (!key) { res.status(500).json({ error: 'BREVO_API_KEY not configured on the server' }); return; }
+  let body = {};
+  if (req.method === 'POST') {
+    body = req.body;
+    if (!body || typeof body === 'string') { try { const raw = await readRaw(req); body = raw ? JSON.parse(raw) : {}; } catch (e) { body = {}; } }
+  }
+  const q = new URL(req.url, 'http://localhost').searchParams;
+  const key = (body.apiKey || '').trim() || process.env.BREVO_API_KEY;
+  if (!key) { res.status(500).json({ error: 'No Brevo API key — set it in Admin → Destinations, or as BREVO_API_KEY on the server' }); return; }
   try {
-    // Optional: ?email=... returns that contact's list membership (for verification)
-    const q = new URL(req.url, 'http://localhost').searchParams;
-    const email = q.get('email');
+    // Optional: email (body or ?email=) returns that contact's list membership (for verification)
+    const email = body.email || q.get('email');
     if (email) {
       const cr = await fetch('https://api.brevo.com/v3/contacts/' + encodeURIComponent(email), {
         headers: { 'api-key': key, accept: 'application/json' }

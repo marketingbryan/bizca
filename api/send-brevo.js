@@ -28,12 +28,11 @@ async function brevoUpsert(key, email, attributes, listIds) {
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
-  const key = process.env.BREVO_API_KEY;
-  if (!key) { res.status(500).json({ error: 'BREVO_API_KEY not configured on the server' }); return; }
-
   try {
     let body = req.body;
     if (!body || typeof body === 'string') { const raw = await readRaw(req); body = raw ? JSON.parse(raw) : {}; }
+    const key = (body.apiKey || '').trim() || process.env.BREVO_API_KEY;
+    if (!key) { res.status(500).json({ error: 'No Brevo API key — set it in Admin → Destinations, or as BREVO_API_KEY on the server' }); return; }
     const lead = body.lead || {};
     const email = (lead.email || '').trim();
     if (!email) { res.status(400).json({ error: 'Lead has no email — Brevo requires an email address' }); return; }
@@ -57,7 +56,8 @@ module.exports = async (req, res) => {
       BIZCA_COUNTRY: lead.country || '',
       BIZCA_INTEREST: lead.interesse || '',
       BIZCA_EVENT: lead.event || '',
-      BIZCA_OWNER: lead.owner || ''
+      BIZCA_OWNER: lead.owner || '',
+      BIZCA_CONSENT: lead.consent || ''
     };
 
     let result = await brevoUpsert(key, email, full, listIds);
