@@ -42,13 +42,13 @@ a{color:var(--indigo);text-decoration:none}
 
 /* Buttons */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;
-  padding:14px 20px;border-radius:999px;font-weight:600;font-size:16px;transition:.15s}
+  padding:14px 20px;border-radius:16px;font-weight:600;font-size:16px;transition:.15s}
 .btn.primary{background:var(--grad);color:#fff;box-shadow:0 6px 16px rgba(2,132,199,.28)}
 .btn.primary:active{transform:translateY(1px)}
 .btn.ghost{background:var(--surface);color:var(--indigo);border:1.5px solid var(--line)}
 .btn.soft{background:#E0F2FE;color:var(--indigo)}
 .btn.danger{background:#FEF2F2;color:var(--red)}
-.btn.sm{width:auto;padding:9px 16px;font-size:14px;border-radius:999px}
+.btn.sm{width:auto;padding:9px 16px;font-size:14px;border-radius:12px}
 .btn:disabled{opacity:.5}
 .btnrow{display:flex;gap:10px}
 .btnrow .btn{width:auto;flex:1}
