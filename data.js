@@ -5,11 +5,11 @@ window.DB = {
   company: { id: 'vid', name: 'VID', domain: 'vid.example', locale: 'en', sso: 'Microsoft 365' },
 
   users: [
-    { id: 'u_admin', name: 'Gaia Bianchi', email: 'gaia@vid.example', role: 'admin', status: 'active' },
-    { id: 'u_marco', name: 'Marco Rossi', email: 'marco@vid.example', role: 'seller', status: 'active' },
-    { id: 'u_lena',  name: 'Lena Vogel',  email: 'lena@vid.example',  role: 'seller', status: 'active' },
-    { id: 'u_sam',   name: 'Sam Turner',  email: 'sam@vid.example',   role: 'seller', status: 'active' },
-    { id: 'u_you',   name: 'You (Seller)', email: 'you@vid.example',  role: 'seller', status: 'active' }
+    { id: 'u_max',    name: 'Max',              email: 'max@bryan.it',              role: 'admin',  status: 'active' },
+    { id: 'u_davide', name: 'Davide Berardino', email: 'davide.berardino@bryan.it', role: 'admin',  status: 'active' },
+    { id: 'u_marco',  name: 'Marco Rossi',      email: 'marco@vid.example',         role: 'seller', status: 'active' },
+    { id: 'u_lena',   name: 'Lena Vogel',       email: 'lena@vid.example',          role: 'seller', status: 'active' },
+    { id: 'u_sam',    name: 'Sam Turner',       email: 'sam@vid.example',           role: 'seller', status: 'active' }
   ],
 
   // Closed lists — managed by admin only

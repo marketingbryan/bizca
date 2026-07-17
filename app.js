@@ -222,12 +222,21 @@
           '<button class="btn primary" id="login">Sign in</button>' +
         '</div>' +
       '</div>';
-    const signInEmail = () => {
+    const signInEmail = async () => {
       const email = ($('#email').value || '').trim().toLowerCase();
-      if (!email) { toast('Enter your work email', 'err'); return; }
+      const pwd = $('#pwd').value || '';
+      if (!email || !pwd) { toast('Enter your work email and password', 'err'); return; }
       const u = DB.users.find(x => x.email.toLowerCase() === email && x.status === 'active');
       if (!u) { toast('Account not found — ask your admin to invite you', 'err'); return; }
-      S.user = u; saveState(); go('#/home');
+      const btn = $('#login'); if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Signing in…'; }
+      const reset = () => { if (btn) { btn.disabled = false; btn.textContent = 'Sign in'; } };
+      try {
+        const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: pwd }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || 'Sign-in unavailable');
+        if (!d.ok) { toast('Wrong password', 'err'); reset(); return; }
+        S.user = u; saveState(); go('#/home');
+      } catch (e) { toast(e.message, 'err'); reset(); }
     };
     $('#sso').onclick = () => toast('Microsoft SSO is enabled once your IT completes the Azure AD setup');
     $('#login').onclick = signInEmail;
