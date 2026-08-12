@@ -211,11 +211,27 @@
     app.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', () => go(b.getAttribute('data-nav'))));
   }
 
-  /* ---------- Setup wizard (first run, per company) ---------- */
+  /* ---------- Welcome (sign in or register a company) ---------- */
+  function welcomeScreen() {
+    app.innerHTML =
+      '<div class="login">' +
+        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Turn business cards into qualified leads</p></div>' +
+        '<div class="card" style="box-shadow:var(--shadow-lg)">' +
+          '<h3 style="text-align:center">Welcome</h3>' +
+          '<p class="hint" style="text-align:center">Sign in if your company already uses Bizca, or create a new workspace.</p>' +
+          '<button class="btn primary" id="wSignIn">Sign in</button>' +
+          '<button class="btn ghost" id="wRegister" style="margin-top:10px">' + ic.plus + ' Register your company</button>' +
+        '</div>' +
+      '</div>';
+    $('#wSignIn').onclick = () => go('#/login');
+    $('#wRegister').onclick = () => go('#/setup');
+  }
+
+  /* ---------- Setup wizard (register a company) ---------- */
   function setupScreen() {
     app.innerHTML =
       '<div class="login" style="justify-content:flex-start;padding-top:40px">' +
-        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Set up your company</p></div>' +
+        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Register your company</p></div>' +
         '<div class="card" style="box-shadow:var(--shadow-lg)">' +
           '<h3>Company</h3><p class="hint">This creates your workspace. You can change everything later in Admin.</p>' +
           '<div class="field"><label>Company name <span class="req">*</span></label><input class="input" id="coName" placeholder="Acme S.p.A."></div>' +
@@ -228,8 +244,10 @@
           '<div class="field"><label>Sources (provenienza)</label><input class="input" id="coSources" placeholder="Trade show 2026, Booth walk-in, Referral"></div>' +
           '<div class="field"><label>Interests</label><input class="input" id="coInterests" placeholder="Product A, Product B, Service"></div>' +
           '<button class="btn primary" id="doSetup">Create workspace</button>' +
+          (DB.company.configured ? '' : '<button class="btn ghost" id="backWelcome" style="margin-top:10px">Back</button>') +
         '</div>' +
       '</div>';
+    const bw = $('#backWelcome'); if (bw) bw.onclick = () => go('#/welcome');
     $('#doSetup').onclick = () => {
       const name = ($('#coName').value || '').trim();
       const domain = ($('#coDomain').value || '').trim().toLowerCase().replace(/^@/, '');
@@ -263,9 +281,13 @@
           '<div class="field"><label>Work email</label><input class="input" id="email" type="email" placeholder="name@' + esc(DB.company.domain || 'company.com') + '" autocomplete="username"></div>' +
           '<div class="field"><label>Password</label><input class="input" id="pwd" type="password" placeholder="••••••••" autocomplete="current-password"></div>' +
           '<button class="btn primary" id="login">Sign in</button>' +
-          '<p class="hint" style="text-align:center;margin:12px 0 0">Access is limited to users invited by your admin.</p>' +
+          (DB.company.configured
+            ? '<p class="hint" style="text-align:center;margin:12px 0 0">Access is limited to users invited by your admin.</p>'
+            : '<div class="banner" style="margin:14px 0 0">' + ic.info + '<div>No workspace on this device yet. If your company already uses Bizca, sign in with Google using your work account — otherwise register your company.</div></div>' +
+              '<button class="btn ghost" id="backWelcome" style="margin-top:10px">Back</button>') +
         '</div>' +
       '</div>';
+    const bw = $('#backWelcome'); if (bw) bw.onclick = () => go('#/welcome');
     const signInEmail = async () => {
       const email = ($('#email').value || '').trim().toLowerCase();
       const pwd = $('#pwd').value || '';
@@ -827,9 +849,15 @@
     const raw = location.hash || '#/login';
     const [path, query] = raw.split('?');
     const params = {}; if (query) query.split('&').forEach(p => { const [k,v]=p.split('='); params[k]=decodeURIComponent(v); });
-    // Unconfigured install → run the setup wizard first
-    if (!DB.company.configured) { if (path !== '#/setup') return go('#/setup'); return setupScreen(); }
-    if (path === '#/setup') return go(S.user ? '#/home' : '#/login');
+    // Unconfigured install → welcome screen (sign in or register a company)
+    if (!DB.company.configured) {
+      window.scrollTo(0,0);
+      if (path === '#/setup') return setupScreen();
+      if (path === '#/login') return loginScreen();
+      if (path !== '#/welcome') return go('#/welcome');
+      return welcomeScreen();
+    }
+    if (path === '#/setup' || path === '#/welcome') return go(S.user ? '#/home' : '#/login');
     if (path !== '#/login' && !S.user) return go('#/login');
     window.scrollTo(0,0);
     switch (path) {
@@ -853,7 +881,7 @@
   window.addEventListener('hashchange', render);
 
   loadState();
-  if (!DB.company.configured) location.hash = '#/setup';
-  else if (S.user && (!location.hash || location.hash === '#/login' || location.hash === '#/' || location.hash === '#/setup')) location.hash = '#/home';
+  if (!DB.company.configured) { if (['#/setup','#/login'].indexOf(location.hash) === -1) location.hash = '#/welcome'; }
+  else if (S.user && (!location.hash || location.hash === '#/login' || location.hash === '#/' || location.hash === '#/setup' || location.hash === '#/welcome')) location.hash = '#/home';
   render();
 })();
