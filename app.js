@@ -21,9 +21,11 @@
   function saveState() {
     try {
       const snap = {
+        company: DB.company,
         leads: DB.leads, pickLists: DB.pickLists, events: DB.events,
         assignmentRules: DB.assignmentRules, users: DB.users, destinations: DB.destinations,
         fallbackOwner: DB.fallbackOwner, allowOverride: DB.allowOverride, autoSend: DB.autoSend,
+        requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey,
         syncLog: DB.syncLog.slice(0, 300),
         session: { activeEventId: S.activeEventId, userId: S.user ? S.user.id : null }
       };
@@ -47,8 +49,8 @@
       const raw = localStorage.getItem(STORE_KEY);
       if (!raw) return;
       const d = JSON.parse(raw);
-      ['leads','pickLists','events','assignmentRules','users','destinations','syncLog'].forEach(k => { if (d[k]) DB[k] = d[k]; });
-      ['fallbackOwner','allowOverride','autoSend'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
+      ['company','leads','pickLists','events','assignmentRules','users','destinations','syncLog'].forEach(k => { if (d[k]) DB[k] = d[k]; });
+      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
       if (d.session) {
         if (d.session.activeEventId) S.activeEventId = d.session.activeEventId;
         if (d.session.userId) { const u = DB.users.find(x => x.id === d.session.userId); if (u) S.user = u; }
@@ -209,17 +211,59 @@
     app.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', () => go(b.getAttribute('data-nav'))));
   }
 
+  /* ---------- Setup wizard (first run, per company) ---------- */
+  function setupScreen() {
+    app.innerHTML =
+      '<div class="login" style="justify-content:flex-start;padding-top:40px">' +
+        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Set up your company</p></div>' +
+        '<div class="card" style="box-shadow:var(--shadow-lg)">' +
+          '<h3>Company</h3><p class="hint">This creates your workspace. You can change everything later in Admin.</p>' +
+          '<div class="field"><label>Company name <span class="req">*</span></label><input class="input" id="coName" placeholder="Acme S.p.A."></div>' +
+          '<div class="field"><label>Email domain <span class="req">*</span></label><input class="input" id="coDomain" placeholder="acme.com"></div>' +
+          '<h3 style="margin-top:18px">Your admin account</h3>' +
+          '<div class="field"><label>Full name <span class="req">*</span></label><input class="input" id="adName" placeholder="Jane Doe"></div>' +
+          '<div class="field"><label>Work email <span class="req">*</span></label><input class="input" id="adEmail" type="email" placeholder="jane@acme.com"></div>' +
+          '<h3 style="margin-top:18px">Qualification lists</h3>' +
+          '<p class="hint">Comma-separated. Sellers pick from these when qualifying a lead.</p>' +
+          '<div class="field"><label>Sources (provenienza)</label><input class="input" id="coSources" placeholder="Trade show 2026, Booth walk-in, Referral"></div>' +
+          '<div class="field"><label>Interests</label><input class="input" id="coInterests" placeholder="Product A, Product B, Service"></div>' +
+          '<button class="btn primary" id="doSetup">Create workspace</button>' +
+        '</div>' +
+      '</div>';
+    $('#doSetup').onclick = () => {
+      const name = ($('#coName').value || '').trim();
+      const domain = ($('#coDomain').value || '').trim().toLowerCase().replace(/^@/, '');
+      const adName = ($('#adName').value || '').trim();
+      const adEmail = ($('#adEmail').value || '').trim().toLowerCase();
+      if (!name || !domain || !adName || !adEmail) { toast('Fill in the required fields', 'err'); return; }
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adEmail)) { toast('Enter a valid email address', 'err'); return; }
+      DB.company = { id: domain.replace(/\W+/g, '_'), name: name, domain: domain, locale: 'en', configured: true };
+      DB.users = [{ id: 'u_' + Date.now(), name: adName, email: adEmail, role: 'admin', status: 'active' }];
+      DB.fallbackOwner = DB.users[0].id;
+      const split = v => (v || '').split(',').map(s => s.trim()).filter(Boolean);
+      DB.pickLists.provenienza = split($('#coSources').value).map((v, i) => ({ id: 'p' + (i + 1), value: v, active: true }));
+      DB.pickLists.interesse = split($('#coInterests').value).map((v, i) => ({ id: 'i' + (i + 1), value: v, active: true }));
+      S.user = DB.users[0];
+      saveState();
+      toast('Workspace created — welcome to Bizca', 'ok');
+      go('#/home');
+    };
+  }
+
   /* ---------- Login ---------- */
+  let googleReady = false;
   function loginScreen() {
     app.innerHTML =
       '<div class="login">' +
-        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Event Leads to CRM · ' + esc(DB.company.name) + '</p></div>' +
+        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Event Leads to CRM' + (DB.company.name ? ' · ' + esc(DB.company.name) : '') + '</p></div>' +
         '<div class="card" style="box-shadow:var(--shadow-lg)">' +
-          '<button class="ms-btn" id="sso">' + ic.ms + 'Sign in with Microsoft</button>' +
+          '<div id="gBtn" style="display:flex;justify-content:center;min-height:44px"></div>' +
+          '<button class="ms-btn" id="sso" style="margin-top:10px">' + ic.ms + 'Sign in with Microsoft</button>' +
           '<div class="divider">or</div>' +
-          '<div class="field"><label>Work email</label><input class="input" id="email" type="email" placeholder="name@' + esc(DB.company.domain) + '" autocomplete="username"></div>' +
+          '<div class="field"><label>Work email</label><input class="input" id="email" type="email" placeholder="name@' + esc(DB.company.domain || 'company.com') + '" autocomplete="username"></div>' +
           '<div class="field"><label>Password</label><input class="input" id="pwd" type="password" placeholder="••••••••" autocomplete="current-password"></div>' +
           '<button class="btn primary" id="login">Sign in</button>' +
+          '<p class="hint" style="text-align:center;margin:12px 0 0">Access is limited to users invited by your admin.</p>' +
         '</div>' +
       '</div>';
     const signInEmail = async () => {
@@ -241,6 +285,47 @@
     $('#sso').onclick = () => toast('Microsoft SSO is enabled once your IT completes the Azure AD setup');
     $('#login').onclick = signInEmail;
     $('#pwd').addEventListener('keydown', e => { if (e.key === 'Enter') signInEmail(); });
+    initGoogle();
+  }
+
+  // Google Identity Services — the ID token is verified server-side,
+  // and only users already invited by the admin are allowed in.
+  async function initGoogle() {
+    const host = document.getElementById('gBtn');
+    if (!host) return;
+    let clientId = '';
+    try {
+      const r = await fetch('/api/config');
+      const d = await r.json().catch(() => ({}));
+      clientId = d.googleClientId || '';
+    } catch (e) {}
+    if (!clientId) { host.innerHTML = '<p class="hint" style="margin:0">Google sign-in not configured yet.</p>'; return; }
+    const start = () => {
+      if (!window.google || !google.accounts || !google.accounts.id) return;
+      google.accounts.id.initialize({ client_id: clientId, callback: onGoogleCredential });
+      google.accounts.id.renderButton(host, { theme: 'outline', size: 'large', width: 320, text: 'signin_with' });
+      googleReady = true;
+    };
+    if (window.google && window.google.accounts) { start(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client'; s.async = true; s.defer = true;
+    s.onload = start;
+    s.onerror = () => { host.innerHTML = '<p class="hint" style="margin:0">Google sign-in unavailable.</p>'; };
+    document.head.appendChild(s);
+  }
+
+  window.onGoogleCredential = onGoogleCredential;
+  async function onGoogleCredential(resp) {
+    try {
+      const r = await fetch('/api/google-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: resp.credential }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || 'Google sign-in failed');
+      const email = (d.email || '').toLowerCase();
+      const u = DB.users.find(x => x.email.toLowerCase() === email && x.status === 'active');
+      if (!u) { toast('No Bizca account for ' + email + ' — ask your admin to invite you', 'err'); return; }
+      if (!u.name && d.name) u.name = d.name;
+      S.user = u; saveState(); toast('Signed in with Google', 'ok'); go('#/home');
+    } catch (e) { toast(e.message, 'err'); }
   }
 
   /* ---------- Home ---------- */
@@ -252,13 +337,18 @@
     const body =
       (deferredPrompt ? '<button class="btn soft" id="installApp" style="margin-bottom:12px">' + ic.plus + ' Install Bizca on your device</button>' : '') +
       (S.online ? '' : '<div class="banner offline-tag" style="background:#FEF3C7;border-color:#FDE68A;color:#92400E">' + ic.info + '<div>You are offline. Captures and sends are queued and will sync automatically when you are back online.</div></div>') +
-      '<div class="banner">' + ic.info + '<div>Active event applies presets to every card you scan. Switch it anytime.</div></div>' +
-      '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
-        '<div class="section-title" style="margin:0 0 6px">Active event</div>' +
-        '<h3 style="font-size:18px">' + esc(ev.name) + '</h3>' +
-        '<p class="hint" style="margin:2px 0 12px">' + esc(ev.dates) + ' · ' + presetSummary(ev) + '</p>' +
-        '<button class="btn ghost sm" id="switchEv">Switch event</button>' +
-      '</div>' +
+      (ev ? '<div class="banner">' + ic.info + '<div>Active event applies presets to every card you scan. Switch it anytime.</div></div>' +
+        '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
+          '<div class="section-title" style="margin:0 0 6px">Active event</div>' +
+          '<h3 style="font-size:18px">' + esc(ev.name) + '</h3>' +
+          '<p class="hint" style="margin:2px 0 12px">' + esc(ev.dates) + ' · ' + presetSummary(ev) + '</p>' +
+          '<button class="btn ghost sm" id="switchEv">Switch event</button>' +
+        '</div>'
+      : '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
+          '<div class="section-title" style="margin:0 0 6px">No event yet</div>' +
+          '<p class="hint" style="margin:2px 0 12px">Create an event (trade show, fair) to apply presets to every card you scan.</p>' +
+          (isAdmin() ? '<button class="btn ghost sm" data-nav="#/admin/events">Create event</button>' : '<p class="hint" style="margin:0">Ask your admin to create one.</p>') +
+        '</div>') +
       '<button class="btn primary" data-nav="#/scan" style="margin-bottom:12px">' + ic.camera + ' Scan a business card</button>' +
       '<div class="btnrow" style="margin-bottom:8px">' +
         '<button class="btn soft" data-nav="#/batch">' + ic.grid + ' Batch (' + drafts + ')</button>' +
@@ -271,9 +361,9 @@
         stat(ready, 'Ready to send', 'i') +
         stat(mine.filter(l=>l.status==='Sent').length, 'Sent', 'g') +
       '</div>';
-    shell('Hi, ' + user().name.split(' ')[0], DB.company.name + ' · ' + (isAdmin()?'Admin':'Seller'), body, '#/home', { brand:true, right:'<button class="iconbtn" id="logout" title="Sign out">'+ic.chevR+'</button>',
+    shell('Hi, ' + (user().name || user().email).split(' ')[0], DB.company.name + ' · ' + (isAdmin()?'Admin':'Seller'), body, '#/home', { brand:true, right:'<button class="iconbtn" id="logout" title="Sign out">'+ic.chevR+'</button>',
       bind(){
-        $('#switchEv').onclick = eventPicker;
+        const sw = $('#switchEv'); if (sw) sw.onclick = eventPicker;
         $('#logout').onclick = () => { S.user=null; saveState(); go('#/login'); };
         const inst = $('#installApp'); if (inst) inst.onclick = async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); try { await deferredPrompt.userChoice; } catch(e){} deferredPrompt = null; render(); };
       }});
@@ -293,7 +383,7 @@
     const body =
       '<div class="card">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
-          '<div><h3 style="margin:0">Scan card</h3><p class="hint" style="margin:0">Event: ' + esc(activeEvent().name) + '</p></div>' +
+          '<div><h3 style="margin:0">Scan card</h3><p class="hint" style="margin:0">Event: ' + esc(activeEvent() ? activeEvent().name : 'none') + '</p></div>' +
           '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:13px;font-weight:600;color:var(--slate)">Batch</span><div class="switch ' + (batchMode?'on':'') + '" id="batchToggle"></div></div>' +
         '</div>' +
         '<div class="scanview" id="scanview"><div class="frame"></div><div style="text-align:center;color:#94A3B8"><div style="width:46px;height:46px;margin:0 auto;color:#CBD5E1">' + ic.camera + '</div><div style="font-size:13px;margin-top:10px">Point at a business card</div></div></div>' +
@@ -361,12 +451,13 @@
   function finishScan(d, image, isReal, errMsg) {
     d = d || {};
     const ev = activeEvent();
+    const preset = (ev && ev.preset) || { provenienza: '', country: '', interesse: '' };
     const lead = {
       id: 'l' + Date.now(),
       first: d.first || '', last: d.last || '', company: d.company || '', role: d.role || '',
       email: d.email || '', phone: d.phone || '', website: d.website || '', address: d.address || '',
-      provenienza: ev.preset.provenienza || '', country: d.country || ev.preset.country || '', interesse: ev.preset.interesse || '',
-      eventId: ev.id, ownerId: null, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
+      provenienza: preset.provenienza || '', country: d.country || preset.country || '', interesse: preset.interesse || '',
+      eventId: ev ? ev.id : null, ownerId: null, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
     };
     if (lead.country && lead.interesse) lead.ownerId = assign(lead.country, lead.interesse).owner;
     DB.leads.unshift(lead);
@@ -542,7 +633,7 @@
     shell('Batch queue', q.length+' card(s)', body, null, { back:'#/home', bind(){
       app.querySelectorAll('[data-sel]').forEach(c => c.onclick = () => { const id=c.getAttribute('data-sel'); batchSel.has(id)?batchSel.delete(id):batchSel.add(id); batchScreen(); });
       app.querySelectorAll('[data-open]').forEach(m => m.onclick = () => go('#/lead?id=' + m.getAttribute('data-open')));
-      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); q.forEach(l=>{ if(ev.preset.provenienza)l.provenienza=ev.preset.provenienza; if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(requiredFilled(l)){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; l.status='Ready';} }); toast('Preset applied to queue','ok'); batchScreen(); };
+      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast('No active event','err'); return; } q.forEach(l=>{ if(ev.preset.provenienza)l.provenienza=ev.preset.provenienza; if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(requiredFilled(l)){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; l.status='Ready';} }); toast('Preset applied to queue','ok'); batchScreen(); };
       const aa=$('#autoAssign'); if(aa) aa.onclick = () => { let n=0; q.forEach(l=>{ if(l.country&&l.interesse){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; if(requiredFilled(l))l.status='Ready'; n++;} }); toast(n+' lead(s) assigned','ok'); batchScreen(); };
       const ss=$('#sendSel'); if(ss) ss.onclick = async () => {
         if(!batchSel.size){ toast('Select at least one lead','err'); return; }
@@ -612,13 +703,45 @@
   }
 
   function adminTeam() {
-    const body = DB.users.map(u => '<div class="lead"><div class="avatar">'+esc(initials(u.name))+'</div><div class="meta"><div class="name">'+esc(u.name)+'</div><div class="co">'+esc(u.email)+' · '+esc(u.role)+'</div></div><div class="switch '+(u.status==='active'?'on':'')+'" data-u="'+u.id+'"></div></div>').join('') +
-      '<button class="btn primary" id="invite" style="margin-top:8px">'+ic.plus+' Invite seller</button>';
-    shell('Team & access', 'Sellers & admins', body, null, { back:'#/admin', bind(){
-      app.querySelectorAll('[data-u]').forEach(sw => sw.onclick = () => { const u=DB.users.find(x=>x.id===sw.getAttribute('data-u')); u.status = u.status==='active'?'disabled':'active'; toast(u.name+' '+u.status,'ok'); adminTeam(); });
-      $('#invite').onclick = () => modal('<h3>Invite seller</h3><p class="hint">They receive an email invite (mock).</p><div class="field"><label>Email</label><input class="input" id="invEmail" placeholder="name@vid.example"></div><button class="btn primary" id="doInv">Send invite</button>' + '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>');
-      // bind inside modal after it renders
-      setTimeout(()=>{ const d=document.getElementById('doInv'); if(d) d.onclick=()=>{ const e=document.getElementById('invEmail').value||'new@vid.example'; DB.users.push({id:'u'+Date.now(),name:e.split('@')[0],email:e,role:'seller',status:'active'}); closeModal(); toast('Invite sent','ok'); adminTeam(); }; },0);
+    const me = user();
+    const body = '<div class="banner">'+ic.info+'<div>Users listed here can sign in with Google or with their work email. Anyone not listed is blocked.</div></div>' +
+      DB.users.map(u => '<div class="lead"><div class="avatar">'+esc(initials(u.name||u.email))+'</div>' +
+        '<div class="meta"><div class="name">'+esc(u.name||u.email)+(u.id===me.id?' <span class="pill gray">you</span>':'')+'</div>' +
+        '<div class="co">'+esc(u.email)+'</div>' +
+        '<div class="tags"><span class="pill '+(u.role==='admin'?'indigo':'gray')+'">'+esc(u.role)+'</span>'+(u.status==='active'?'':'<span class="pill red">disabled</span>')+'</div></div>' +
+        '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">' +
+          '<div class="switch '+(u.status==='active'?'on':'')+'" data-u="'+u.id+'" title="Enable / disable"></div>' +
+          (u.id!==me.id?'<button class="pill gray" data-role="'+u.id+'" style="border:none;cursor:pointer">make '+(u.role==='admin'?'seller':'admin')+'</button>':'') +
+        '</div></div>').join('') +
+      '<button class="btn primary" id="invite" style="margin-top:8px">'+ic.plus+' Add user</button>';
+    shell('Team & access', DB.users.length + ' user(s)', body, null, { back:'#/admin', bind(){
+      app.querySelectorAll('[data-u]').forEach(sw => sw.onclick = () => {
+        const u=DB.users.find(x=>x.id===sw.getAttribute('data-u'));
+        if (u.id===me.id) { toast('You cannot disable your own account','err'); return; }
+        if (u.role==='admin' && u.status==='active' && DB.users.filter(x=>x.role==='admin'&&x.status==='active').length<=1) { toast('Keep at least one active admin','err'); return; }
+        u.status = u.status==='active'?'disabled':'active'; saveState(); toast(esc(u.name||u.email)+' '+u.status,'ok'); adminTeam();
+      });
+      app.querySelectorAll('[data-role]').forEach(b => b.onclick = () => {
+        const u=DB.users.find(x=>x.id===b.getAttribute('data-role'));
+        if (u.role==='admin' && DB.users.filter(x=>x.role==='admin'&&x.status==='active').length<=1) { toast('Keep at least one admin','err'); return; }
+        u.role = u.role==='admin'?'seller':'admin'; saveState(); toast(esc(u.name||u.email)+' is now '+u.role,'ok'); adminTeam();
+      });
+      $('#invite').onclick = () => {
+        modal('<h3>Add user</h3><p class="hint">They can then sign in with Google or their work email.</p>' +
+          '<div class="field"><label>Full name</label><input class="input" id="invName" placeholder="Jane Doe"></div>' +
+          '<div class="field"><label>Work email</label><input class="input" id="invEmail" type="email" placeholder="name@'+esc(DB.company.domain||'company.com')+'"></div>' +
+          '<div class="field"><label>Role</label><select class="input" id="invRole"><option value="seller">Seller</option><option value="admin">Admin</option></select></div>' +
+          '<button class="btn primary" id="doInv">Add user</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>');
+        setTimeout(()=>{ const d=document.getElementById('doInv'); if(d) d.onclick=()=>{
+          const email=(document.getElementById('invEmail').value||'').trim().toLowerCase();
+          const name=(document.getElementById('invName').value||'').trim();
+          const role=document.getElementById('invRole').value;
+          if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ toast('Enter a valid email','err'); return; }
+          if(DB.users.some(u=>u.email.toLowerCase()===email)){ toast('That user already exists','err'); return; }
+          DB.users.push({id:'u'+Date.now(),name:name||email.split('@')[0],email:email,role:role,status:'active'});
+          saveState(); closeModal(); toast('User added','ok'); adminTeam();
+        }; },0);
+      };
     }});
   }
 
@@ -695,7 +818,7 @@
     shell('Events', 'Presets & Brevo list per event', body, null, { back:'#/admin', bind(){
       if (!lists) loadBrevoLists().then(r => { if (r && location.hash.indexOf('#/admin/events') === 0) adminEvents(); });
       app.querySelectorAll('[data-evlist]').forEach(sel => sel.onchange = () => { const e=DB.events.find(x=>x.id===sel.getAttribute('data-evlist')); e.brevoListId = sel.value ? parseInt(sel.value,10) : null; saveState(); toast(e.brevoListId?('Routing to '+listName(e.brevoListId)):'List cleared','ok'); adminEvents(); });
-      $('#newEv').onclick = () => modal('<h3>New event</h3><div class="field"><label>Name</label><input class="input" id="evn" placeholder="Trade show 2026"></div><div class="field"><label>Dates</label><input class="input" id="evd" placeholder="Sep 1–3, 2026"></div><button class="btn primary" id="evAdd">Create</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const a=document.getElementById('evAdd'); if(a) a.onclick=()=>{ DB.events.push({id:'e'+Date.now(),name:document.getElementById('evn').value||'New event',dates:document.getElementById('evd').value||'',status:'open',preset:{provenienza:'',country:'',interesse:''},brevoListId:null}); closeModal(); toast('Event created','ok'); adminEvents(); }; },0);
+      $('#newEv').onclick = () => modal('<h3>New event</h3><div class="field"><label>Name</label><input class="input" id="evn" placeholder="Trade show 2026"></div><div class="field"><label>Dates</label><input class="input" id="evd" placeholder="Sep 1–3, 2026"></div><button class="btn primary" id="evAdd">Create</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const a=document.getElementById('evAdd'); if(a) a.onclick=()=>{ const ne={id:'e'+Date.now(),name:document.getElementById('evn').value||'New event',dates:document.getElementById('evd').value||'',status:'open',preset:{provenienza:'',country:'',interesse:''},brevoListId:null}; DB.events.push(ne); if(!S.activeEventId) S.activeEventId=ne.id; saveState(); closeModal(); toast('Event created','ok'); adminEvents(); }; },0);
     }});
   }
 
@@ -704,6 +827,9 @@
     const raw = location.hash || '#/login';
     const [path, query] = raw.split('?');
     const params = {}; if (query) query.split('&').forEach(p => { const [k,v]=p.split('='); params[k]=decodeURIComponent(v); });
+    // Unconfigured install → run the setup wizard first
+    if (!DB.company.configured) { if (path !== '#/setup') return go('#/setup'); return setupScreen(); }
+    if (path === '#/setup') return go(S.user ? '#/home' : '#/login');
     if (path !== '#/login' && !S.user) return go('#/login');
     window.scrollTo(0,0);
     switch (path) {
@@ -727,6 +853,7 @@
   window.addEventListener('hashchange', render);
 
   loadState();
-  if (S.user && (!location.hash || location.hash === '#/login' || location.hash === '#/')) location.hash = '#/home';
+  if (!DB.company.configured) location.hash = '#/setup';
+  else if (S.user && (!location.hash || location.hash === '#/login' || location.hash === '#/' || location.hash === '#/setup')) location.hash = '#/home';
   render();
 })();

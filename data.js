@@ -1,56 +1,32 @@
-/* Bizca — seed data for the prototype (in-memory, mock).
-   Tenant: VID. All labels in English (MVP is English-only, i18n-ready). */
+/* Bizca — initial state.
+   The app ships unconfigured: the first admin runs the in-app setup wizard to
+   create their company. All labels in English (i18n-ready). */
 
 window.DB = {
-  company: { id: 'vid', name: 'VID', domain: 'vid.example', locale: 'en', sso: 'Microsoft 365' },
+  // configured=false until the setup wizard completes
+  company: { id: '', name: '', domain: '', locale: 'en', configured: false },
 
-  users: [
-    { id: 'u_max',    name: 'Max',              email: 'max@bryan.it',              role: 'admin',  status: 'active' },
-    { id: 'u_davide', name: 'Davide Berardino', email: 'davide.berardino@bryan.it', role: 'admin',  status: 'active' },
-    { id: 'u_marco',  name: 'Marco Rossi',      email: 'marco@vid.example',         role: 'seller', status: 'active' },
-    { id: 'u_lena',   name: 'Lena Vogel',       email: 'lena@vid.example',          role: 'seller', status: 'active' },
-    { id: 'u_sam',    name: 'Sam Turner',       email: 'sam@vid.example',           role: 'seller', status: 'active' }
-  ],
+  // Users are created by the setup wizard and by admin invites
+  users: [],
 
   // Closed lists — managed by admin only
   pickLists: {
-    provenienza: [
-      { id: 'p1', value: 'MECSPE 2026', active: true },
-      { id: 'p2', value: 'Booth walk-in', active: true },
-      { id: 'p3', value: 'Referral', active: true },
-      { id: 'p4', value: 'Hannover Messe 2026', active: true }
-    ],
-    interesse: [
-      { id: 'i1', value: 'Industrial Automation', active: true },
-      { id: 'i2', value: 'Robotics', active: true },
-      { id: 'i3', value: 'After-sales Service', active: true },
-      { id: 'i4', value: 'Spare Parts', active: true }
-    ]
+    provenienza: [],
+    interesse: []
   },
 
-  // ISO country subset (one country per lead)
-  countries: ['Italy','Germany','France','Spain','United Kingdom','Netherlands','Switzerland','Austria','Poland','United States','Brazil','China','India','United Arab Emirates','Turkey'],
+  // ISO country list (one country per lead)
+  countries: ['Afghanistan','Albania','Algeria','Argentina','Australia','Austria','Bahrain','Bangladesh','Belgium','Bolivia','Bosnia and Herzegovina','Brazil','Bulgaria','Cambodia','Canada','Chile','China','Colombia','Costa Rica','Croatia','Cyprus','Czechia','Denmark','Dominican Republic','Ecuador','Egypt','Estonia','Finland','France','Georgia','Germany','Ghana','Greece','Guatemala','Hong Kong','Hungary','Iceland','India','Indonesia','Iraq','Ireland','Israel','Italy','Japan','Jordan','Kazakhstan','Kenya','Kuwait','Latvia','Lebanon','Lithuania','Luxembourg','Malaysia','Malta','Mexico','Moldova','Montenegro','Morocco','Netherlands','New Zealand','Nigeria','North Macedonia','Norway','Oman','Pakistan','Panama','Paraguay','Peru','Philippines','Poland','Portugal','Qatar','Romania','Saudi Arabia','Serbia','Singapore','Slovakia','Slovenia','South Africa','South Korea','Spain','Sri Lanka','Sweden','Switzerland','Taiwan','Thailand','Tunisia','Turkey','Ukraine','United Arab Emirates','United Kingdom','United States','Uruguay','Venezuela','Vietnam'],
 
-  events: [
-    { id: 'e1', name: 'MECSPE 2026', dates: 'Mar 4–6, 2026', status: 'open',
-      preset: { provenienza: 'MECSPE 2026', country: 'Italy', interesse: '' } },
-    { id: 'e2', name: 'Hannover Messe 2026', dates: 'Apr 20–24, 2026', status: 'open',
-      preset: { provenienza: 'Hannover Messe 2026', country: 'Germany', interesse: 'Industrial Automation' } },
-    { id: 'e3', name: 'Automatica 2026', dates: 'Jun 23–26, 2026', status: 'open',
-      preset: { provenienza: 'Booth walk-in', country: '', interesse: 'Robotics' } }
-  ],
+  events: [],
 
   // Ordered rules: first match wins. Empty array = any.
-  assignmentRules: [
-    { id: 'r1', priority: 1, countries: ['Germany','Austria','Switzerland'], interests: [], owner: 'u_lena', active: true },
-    { id: 'r2', priority: 2, countries: [], interests: ['Robotics'], owner: 'u_sam', active: true },
-    { id: 'r3', priority: 3, countries: ['Italy'], interests: ['After-sales Service','Spare Parts'], owner: 'u_marco', active: true }
-  ],
-  fallbackOwner: 'u_marco',
+  assignmentRules: [],
+  fallbackOwner: null,
   allowOverride: true,
 
   destinations: [
-    { id: 'd_brevo', type: 'brevo', label: 'Brevo (VID CRM)', status: 'connected', detail: 'Server-side API key (Vercel env) · create/update contact, dedupe by email, BIZCA_* attributes' },
+    { id: 'd_brevo', type: 'brevo', label: 'Brevo (CRM)', status: 'connected', detail: 'Create/update contact, dedupe by email, BIZCA_* attributes, list per event' },
     { id: 'd_excel', type: 'excel', label: 'Excel — SharePoint', status: 'simulated', detail: 'Simulated — needs Microsoft Graph / Azure AD app with admin consent' }
   ],
   autoSend: true,
@@ -64,4 +40,4 @@ window.DB = {
 };
 
 // Session state
-window.SESSION = { user: null, activeEventId: 'e1', online: true };
+window.SESSION = { user: null, activeEventId: null, online: true };

@@ -24,8 +24,30 @@
   <script src="data.js"></script>
   <script src="app.js"></script>
   <script>
+    // Service worker with auto-update: when a new version is deployed the app
+    // picks it up and reloads itself, so users never sit on a stale build.
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(()=>{}));
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').then(reg => {
+          if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+          reg.addEventListener('updatefound', () => {
+            const nw = reg.installing;
+            if (!nw) return;
+            nw.addEventListener('statechange', () => {
+              if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+                nw.postMessage({ type: 'SKIP_WAITING' });
+              }
+            });
+          });
+          // check for a new version on load and every 60s
+          reg.update().catch(() => {});
+          setInterval(() => reg.update().catch(() => {}), 60000);
+        }).catch(() => {});
+        let reloading = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (reloading) return; reloading = true; location.reload();
+        });
+      });
     }
   </script>
 </body>

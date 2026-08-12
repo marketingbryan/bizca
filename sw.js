@@ -1,5 +1,5 @@
 /* Bizca service worker — offline-tolerant shell cache */
-const CACHE = 'bizca-v4';
+const CACHE = 'bizca-v5';
 const ASSETS = [
   './',
   './index.html',
@@ -17,6 +17,11 @@ const ASSETS = [
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+});
+
+// Allow the page to activate a freshly installed worker immediately
+self.addEventListener('message', e => {
+  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('activate', e => {
