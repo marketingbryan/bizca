@@ -104,6 +104,7 @@
   // Brevo lists (for per-event routing config in Admin)
   let brevoLists = null;
   async function loadBrevoLists(force) {
+    if (!DB.brevoApiKey) return null;           // no key for this workspace → nothing to load
     if (brevoLists && !force) return brevoLists;
     try {
       const r = await fetch('/api/brevo-lists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: DB.brevoApiKey || undefined }) });
@@ -172,7 +173,7 @@
   function ruleSummary(r) {
     if (!r) return 'Fallback → default owner';
     const c = r.countries.length ? r.countries.join('/') : 'any country';
-    const i = r.interests.length ? r.interests.join('/') : 'any interest';
+    const i = r.interests.length ? r.interests.join('/') : 'any segment';
     return 'Rule #' + r.priority + ': ' + c + ' + ' + i;
   }
 
@@ -233,17 +234,17 @@
       '<div class="login" style="justify-content:flex-start;padding-top:40px">' +
         '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>Register your company</p></div>' +
         '<div class="card" style="box-shadow:var(--shadow-lg)">' +
-          '<h3>Company</h3><p class="hint">This creates your workspace. You can change everything later in Admin.</p>' +
+          '<h3>Company</h3><p class="hint">This creates your workspace. You can configure everything else later in Admin.</p>' +
           '<div class="field"><label>Company name <span class="req">*</span></label><input class="input" id="coName" placeholder="Acme S.p.A."></div>' +
-          '<div class="field"><label>Email domain <span class="req">*</span></label><input class="input" id="coDomain" placeholder="acme.com"></div>' +
+          '<div class="field"><label>Company domain <span class="req">*</span></label><input class="input" id="coDomain" placeholder="acme.com"></div>' +
           '<h3 style="margin-top:18px">Your admin account</h3>' +
           '<div class="field"><label>Full name <span class="req">*</span></label><input class="input" id="adName" placeholder="Jane Doe"></div>' +
           '<div class="field"><label>Work email <span class="req">*</span></label><input class="input" id="adEmail" type="email" placeholder="jane@acme.com"></div>' +
-          '<h3 style="margin-top:18px">Qualification lists</h3>' +
-          '<p class="hint">Comma-separated. Sellers pick from these when qualifying a lead.</p>' +
-          '<div class="field"><label>Sources (provenienza)</label><input class="input" id="coSources" placeholder="Trade show 2026, Booth walk-in, Referral"></div>' +
-          '<div class="field"><label>Interests</label><input class="input" id="coInterests" placeholder="Product A, Product B, Service"></div>' +
-          '<button class="btn primary" id="doSetup">Create workspace</button>' +
+          '<label class="select-item" for="privacyOk" style="cursor:pointer;margin-top:14px">' +
+            '<input type="checkbox" id="privacyOk" style="width:20px;height:20px;accent-color:var(--indigo)">' +
+            '<span style="font-size:13px;color:var(--slate)">I have read and accept the <a href="https://www.bryan.it/privacy-policy" target="_blank" rel="noopener">privacy policy</a> and agree to the processing of my data. <span class="req">*</span></span>' +
+          '</label>' +
+          '<button class="btn primary" id="doSetup" style="margin-top:14px">Create workspace</button>' +
           (DB.company.configured ? '' : '<button class="btn ghost" id="backWelcome" style="margin-top:10px">Back</button>') +
         '</div>' +
       '</div>';
@@ -255,12 +256,10 @@
       const adEmail = ($('#adEmail').value || '').trim().toLowerCase();
       if (!name || !domain || !adName || !adEmail) { toast('Fill in the required fields', 'err'); return; }
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adEmail)) { toast('Enter a valid email address', 'err'); return; }
-      DB.company = { id: domain.replace(/\W+/g, '_'), name: name, domain: domain, locale: 'en', configured: true };
+      if (!$('#privacyOk').checked) { toast('Please accept the privacy policy to continue', 'err'); return; }
+      DB.company = { id: domain.replace(/\W+/g, '_'), name: name, domain: domain, locale: 'en', configured: true, privacyAcceptedAt: Date.now() };
       DB.users = [{ id: 'u_' + Date.now(), name: adName, email: adEmail, role: 'admin', status: 'active' }];
       DB.fallbackOwner = DB.users[0].id;
-      const split = v => (v || '').split(',').map(s => s.trim()).filter(Boolean);
-      DB.pickLists.provenienza = split($('#coSources').value).map((v, i) => ({ id: 'p' + (i + 1), value: v, active: true }));
-      DB.pickLists.interesse = split($('#coInterests').value).map((v, i) => ({ id: 'i' + (i + 1), value: v, active: true }));
       S.user = DB.users[0];
       saveState();
       toast('Workspace created — welcome to Bizca', 'ok');
@@ -363,7 +362,7 @@
         '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
           '<div class="section-title" style="margin:0 0 6px">Active event</div>' +
           '<h3 style="font-size:18px">' + esc(ev.name) + '</h3>' +
-          '<p class="hint" style="margin:2px 0 12px">' + esc(ev.dates) + ' · ' + presetSummary(ev) + '</p>' +
+          '<p class="hint" style="margin:2px 0 12px">' + esc(fmtDates(ev)) + ' · ' + presetSummary(ev) + '</p>' +
           '<button class="btn ghost sm" id="switchEv">Switch event</button>' +
         '</div>'
       : '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
@@ -383,10 +382,19 @@
         stat(ready, 'Ready to send', 'i') +
         stat(mine.filter(l=>l.status==='Sent').length, 'Sent', 'g') +
       '</div>';
-    shell('Hi, ' + (user().name || user().email).split(' ')[0], DB.company.name + ' · ' + (isAdmin()?'Admin':'Seller'), body, '#/home', { brand:true, right:'<button class="iconbtn" id="logout" title="Sign out">'+ic.chevR+'</button>',
+    shell('Hi, ' + (user().name || user().email).split(' ')[0], DB.company.name + ' · ' + (isAdmin()?'Admin':'Seller'), body, '#/home', { brand:true, right:'<button class="iconbtn" id="userMenu" title="Account">'+ic.leads+'</button>',
       bind(){
         const sw = $('#switchEv'); if (sw) sw.onclick = eventPicker;
-        $('#logout').onclick = () => { S.user=null; saveState(); go('#/login'); };
+        $('#userMenu').onclick = () => {
+          modal('<h3>Account</h3>' +
+            '<div class="kv"><span class="k">Name</span><span class="v">'+esc(user().name||'—')+'</span></div>' +
+            '<div class="kv"><span class="k">Email</span><span class="v">'+esc(user().email)+'</span></div>' +
+            '<div class="kv"><span class="k">Role</span><span class="v">'+esc(user().role)+'</span></div>' +
+            '<div class="kv" style="border:none"><span class="k">Company</span><span class="v">'+esc(DB.company.name)+'</span></div>' +
+            '<button class="btn danger" id="doLogout" style="margin-top:14px">Sign out</button>' +
+            '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Close</button>');
+          setTimeout(()=>{ const b=document.getElementById('doLogout'); if(b) b.onclick=()=>{ S.user=null; saveState(); closeModal(); go('#/login'); }; },0);
+        };
         const inst = $('#installApp'); if (inst) inst.onclick = async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); try { await deferredPrompt.userChoice; } catch(e){} deferredPrompt = null; render(); };
       }});
   }
@@ -395,7 +403,7 @@
 
   function eventPicker() {
     modal('<h3 style="margin:0 0 4px">Select active event</h3><p class="hint">Presets pre-fill qualification fields.</p>' +
-      DB.events.map(e => '<div class="select-item ' + (e.id===S.activeEventId?'sel':'') + '" data-ev="' + e.id + '"><div style="flex:1"><div style="font-weight:600">' + esc(e.name) + '</div><div class="hint" style="margin:0">' + esc(e.dates) + ' · ' + presetSummary(e) + '</div></div>' + (e.id===S.activeEventId?ic.check:'') + '</div>').join('') +
+      DB.events.map(e => '<div class="select-item ' + (e.id===S.activeEventId?'sel':'') + '" data-ev="' + e.id + '"><div style="flex:1"><div style="font-weight:600">' + esc(e.name) + '</div><div class="hint" style="margin:0">' + esc(fmtDates(e)) + ' · ' + presetSummary(e) + '</div></div>' + (e.id===S.activeEventId?ic.check:'') + '</div>').join('') +
       '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Close</button>');
     modalRoot.querySelectorAll('[data-ev]').forEach(x => x.onclick = () => { S.activeEventId = x.getAttribute('data-ev'); closeModal(); toast('Active event updated','ok'); render(); });
   }
@@ -519,9 +527,9 @@
       '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>Contact</h3><span class="pill indigo">'+ic.bolt+' AI extracted</span></div><p class="hint">Confirm or fix the fields below.</p>' + (l.image ? '<img src="'+l.image+'" alt="business card" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;margin-bottom:12px;border:1px solid var(--line)">' : '') + contactFields + '</div>' +
 
       '<div class="card"><h3>Qualification</h3><p class="hint">Required before sending. Managed as closed lists by admin.</p>' +
-        '<div class="field"><label>Source (provenienza) <span class="req">*</span></label><select class="input" data-q="provenienza" '+(readOnly?'disabled':'')+'>'+provOpts+'</select></div>' +
+        '<div class="field"><label>Source <span class="req">*</span></label><select class="input" data-q="provenienza" '+(readOnly?'disabled':'')+'>'+provOpts+'</select></div>' +
         '<div class="field"><label>Country <span class="req">*</span></label><select class="input" data-q="country" '+(readOnly?'disabled':'')+'>'+ctryOpts+'</select></div>' +
-        '<div class="field" style="margin-bottom:0"><label>Interest <span class="req">*</span></label><select class="input" data-q="interesse" '+(readOnly?'disabled':'')+'>'+intOpts+'</select></div>' +
+        '<div class="field" style="margin-bottom:0"><label>Segment <span class="req">*</span></label><select class="input" data-q="interesse" '+(readOnly?'disabled':'')+'>'+intOpts+'</select></div>' +
       '</div>' +
 
       '<div class="card"><h3>Assignment</h3><p class="hint" id="ruleHint">' + esc(ruleSummary(a.rule)) + '</p>' +
@@ -708,18 +716,19 @@
   /* ---------- Admin ---------- */
   function adminScreen() {
     const rows = [
-      ['Team & access', DB.users.length+' users', '#/admin/team', ic.leads],
-      ['Closed lists', pick('provenienza').length+' sources · '+pick('interesse').length+' interests', '#/admin/lists', ic.grid],
-      ['Assignment rules', DB.assignmentRules.filter(r=>r.active).length+' active rules', '#/admin/rules', ic.bolt],
-      ['Destinations', DB.destinations.filter(d=>d.status==='connected').length+' connected', '#/admin/dest', ic.send],
-      ['Events', DB.events.length+' events', '#/admin/events', ic.home]
+      ['Events', DB.events.length+' event(s)', '#/admin/events', ic.home],
+      ['Team & access', DB.users.length+' user(s)', '#/admin/team', ic.leads],
+      ['Sources', pick('provenienza').length+' value(s)', '#/admin/sources', ic.grid],
+      ['Segments', pick('interesse').length+' value(s)', '#/admin/segments', ic.grid],
+      ['Assignment rules', DB.assignmentRules.filter(r=>r.active).length+' active rule(s)', '#/admin/rules', ic.bolt],
+      ['Destinations', (DB.brevoApiKey?'Brevo connected':'Brevo not configured'), '#/admin/dest', ic.send]
     ];
-    const body = '<div class="banner">'+ic.info+'<div>Tenant configuration for '+esc(DB.company.name)+'. Multi-tenant ready — each company is isolated.</div></div>' +
+    const body =
       rows.map(r => '<button class="rowbtn" data-nav="'+r[2]+'"><div class="lead-ic">'+r[3]+'</div><div style="flex:1"><div style="font-weight:600">'+esc(r[0])+'</div><div class="hint" style="margin:0">'+esc(r[1])+'</div></div>'+ic.chevR+'</button>').join('') +
       '<div class="section-title">Data</div>' +
       '<button class="btn danger" id="resetDemo">Reset app data on this device</button>' +
       '<p class="hint" style="text-align:center;margin-top:8px">Clears locally-saved leads and configuration on this device. Does not affect Brevo.</p>';
-    shell('Admin', DB.company.name+' tenant', body, '#/admin', { bind(){
+    shell('Admin', DB.company.name, body, '#/admin', { bind(){
       $('#resetDemo').onclick = () => modal('<h3>Reset app data?</h3><p class="hint">This clears all locally-saved leads and settings on this device. It does not affect Brevo.</p><button class="btn danger" id="doReset">Yes, reset</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const b=document.getElementById('doReset'); if(b) b.onclick=resetState; },0);
     }});
   }
@@ -767,24 +776,120 @@
     }});
   }
 
-  function adminLists() {
-    const block = (type, title) => '<div class="card"><h3>'+title+'</h3><p class="hint">Closed list — used in qualification.</p>' +
-      DB.pickLists[type].map(v => '<div class="kv"><span class="k">'+esc(v.value)+'</span><div class="switch '+(v.active?'on':'')+'" data-toggle="'+type+':'+v.id+'"></div></div>').join('') +
-      '<div style="display:flex;gap:8px;margin-top:12px"><input class="input" placeholder="Add value…" data-add="'+type+'"><button class="btn primary sm" data-addbtn="'+type+'">'+ic.plus+'</button></div></div>';
-    const body = block('provenienza','Sources (provenienza)') + block('interesse','Interests');
-    shell('Closed lists', 'Managed by admin', body, null, { back:'#/admin', bind(){
-      app.querySelectorAll('[data-toggle]').forEach(sw => sw.onclick = () => { const [t,id]=sw.getAttribute('data-toggle').split(':'); const v=DB.pickLists[t].find(x=>x.id===id); v.active=!v.active; adminLists(); });
-      app.querySelectorAll('[data-addbtn]').forEach(b => b.onclick = () => { const t=b.getAttribute('data-addbtn'); const inp=app.querySelector('[data-add="'+t+'"]'); if(inp.value.trim()){ DB.pickLists[t].push({id:t[0]+Date.now(),value:inp.value.trim(),active:true}); toast('Value added','ok'); adminLists(); } });
+  // One screen per list: 'provenienza' → Sources, 'interesse' → Segments
+  function adminPickList(type) {
+    const meta = type === 'provenienza'
+      ? { title: 'Sources', hint: 'Where the contact came from (e.g. "MECSPE 2026", "Booth walk-in", "Referral"). Sellers pick one when qualifying a lead.', ph: 'e.g. Booth walk-in' }
+      : { title: 'Segments', hint: 'What the contact is interested in — your product lines or business areas. Sellers pick one when qualifying a lead.', ph: 'e.g. Industrial Automation' };
+    const values = DB.pickLists[type];
+    const rows = values.length
+      ? values.map(v => '<div class="lead" style="padding:10px 12px"><div class="meta"><div class="name">'+esc(v.value)+'</div>' +
+          '<div class="hint" style="margin:0">'+(v.active?'Visible to sellers':'Hidden — kept on existing leads')+'</div></div>' +
+          '<div style="display:flex;align-items:center;gap:10px"><div class="switch '+(v.active?'on':'')+'" data-toggle="'+v.id+'" title="Show / hide"></div>' +
+          '<button class="pill red" data-del="'+v.id+'" style="border:none;cursor:pointer">delete</button></div></div>').join('')
+      : '<div class="list-empty">'+ic.empty+'<p>No values yet. Add the first one below.</p></div>';
+    const body = '<div class="banner">'+ic.info+'<div>'+esc(meta.hint)+'</div></div>' + rows +
+      '<div class="card" style="margin-top:14px"><h3>Add value</h3>' +
+        '<div class="field" style="margin-bottom:10px"><input class="input" id="newVal" placeholder="'+esc(meta.ph)+'"></div>' +
+        '<button class="btn primary" id="addVal">'+ic.plus+' Add</button></div>';
+    shell(meta.title, values.length + ' value(s)', body, '#/admin', { back:'#/admin', bind(){
+      app.querySelectorAll('[data-toggle]').forEach(sw => sw.onclick = () => { const v=values.find(x=>x.id===sw.getAttribute('data-toggle')); v.active=!v.active; saveState(); adminPickList(type); });
+      app.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+        const v = values.find(x=>x.id===b.getAttribute('data-del'));
+        const used = DB.leads.filter(l => (type==='provenienza'?l.provenienza:l.interesse) === v.value).length;
+        modal('<h3>Delete "'+esc(v.value)+'"?</h3><p class="hint">'+(used ? 'It is used by '+used+' lead(s); their existing value is kept. ' : '')+'It will no longer be selectable.</p>' +
+          '<button class="btn danger" id="delYes">Delete</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>');
+        setTimeout(()=>{ const y=document.getElementById('delYes'); if(y) y.onclick=()=>{ DB.pickLists[type]=values.filter(x=>x.id!==v.id); saveState(); closeModal(); toast('Value deleted','ok'); adminPickList(type); }; },0);
+      });
+      const add = () => {
+        const inp = $('#newVal'); const val = (inp.value||'').trim();
+        if (!val) { toast('Type a value first','err'); return; }
+        if (values.some(x => x.value.toLowerCase() === val.toLowerCase())) { toast('That value already exists','err'); return; }
+        DB.pickLists[type].push({ id: type[0] + Date.now(), value: val, active: true });
+        saveState(); toast('Value added','ok'); adminPickList(type);
+      };
+      $('#addVal').onclick = add;
+      $('#newVal').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
     }});
   }
 
   function adminRules() {
-    const body = '<div class="banner">'+ic.info+'<div>First matching rule wins (top to bottom). Fallback owner: '+esc(userName(DB.fallbackOwner))+'.</div></div>' +
-      DB.assignmentRules.sort((a,b)=>a.priority-b.priority).map(r => '<div class="card" style="padding:14px"><div style="display:flex;justify-content:space-between;align-items:start"><div><div style="font-weight:700">#'+r.priority+' → '+esc(userName(r.owner))+'</div><div class="hint" style="margin:4px 0 0">'+esc(ruleSummary(r).replace(/^Rule #\d+: /,''))+'</div></div><div class="switch '+(r.active?'on':'')+'" data-r="'+r.id+'"></div></div></div>').join('') +
-      '<div class="card"><h3>Override</h3><div class="kv" style="border:none"><span class="k">Allow sellers to override owner</span><div class="switch '+(DB.allowOverride?'on':'')+'" id="ovr"></div></div></div>';
-    shell('Assignment rules', 'Country + interest → owner', body, null, { back:'#/admin', bind(){
-      app.querySelectorAll('[data-r]').forEach(sw => sw.onclick = () => { const r=DB.assignmentRules.find(x=>x.id===sw.getAttribute('data-r')); r.active=!r.active; adminRules(); });
-      $('#ovr').onclick = () => { DB.allowOverride=!DB.allowOverride; toast('Override '+(DB.allowOverride?'enabled':'disabled'),'ok'); adminRules(); };
+    const sellers = DB.users.filter(u => u.status === 'active');
+    const rules = DB.assignmentRules.slice().sort((a,b)=>a.priority-b.priority);
+    const chips = (arr, label) => arr && arr.length
+      ? arr.map(v => '<span class="pill gray">'+esc(v)+'</span>').join('')
+      : '<span class="pill gray">any ' + label + '</span>';
+    const list = rules.length
+      ? rules.map((r, i) => '<div class="card" style="padding:14px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:start;gap:10px">' +
+            '<div style="flex:1"><div style="font-weight:700">#'+(i+1)+' → '+esc(userName(r.owner))+'</div>' +
+            '<div class="tags" style="margin-top:8px">'+chips(r.countries,'country')+'</div>' +
+            '<div class="tags" style="margin-top:6px">'+chips(r.interests,'segment')+'</div></div>' +
+            '<div class="switch '+(r.active?'on':'')+'" data-r="'+r.id+'" title="Enable / disable"></div>' +
+          '</div>' +
+          '<div class="btnrow" style="margin-top:12px">' +
+            (i>0?'<button class="btn ghost sm" data-up="'+r.id+'">↑ Up</button>':'') +
+            '<button class="btn ghost sm" data-edit="'+r.id+'">Edit</button>' +
+            '<button class="btn ghost sm" data-delr="'+r.id+'">Delete</button>' +
+          '</div></div>').join('')
+      : '<div class="list-empty">'+ic.empty+'<p>No rules yet. Without rules, every lead goes to the default owner.</p></div>';
+    const body = '<div class="banner">'+ic.info+'<div>Rules run top to bottom: the first match wins. A rule matches when the lead\'s country <b>and</b> segment are both in the rule (leave one empty to match any).</div></div>' +
+      list +
+      '<button class="btn primary" id="newRule" style="margin-top:6px">'+ic.plus+' Add rule</button>' +
+      '<div class="card" style="margin-top:14px"><h3>Default owner</h3><p class="hint">Used when no rule matches.</p>' +
+        '<select class="input" id="fallback">' + sellers.map(u=>'<option value="'+u.id+'" '+(DB.fallbackOwner===u.id?'selected':'')+'>'+esc(u.name||u.email)+'</option>').join('') + '</select></div>' +
+      '<div class="card"><h3>Override</h3><div class="kv" style="border:none"><span class="k">Allow sellers to change the owner on a lead</span><div class="switch '+(DB.allowOverride?'on':'')+'" id="ovr"></div></div></div>';
+
+    const ruleForm = (r) => {
+      const countries = DB.countries;
+      const segs = pick('interesse').map(v=>v.value);
+      const selC = (r && r.countries) || [], selI = (r && r.interests) || [];
+      return '<h3>'+(r?'Edit rule':'New rule')+'</h3>' +
+        '<p class="hint">Pick one or more values. Leave a list empty to match anything.</p>' +
+        '<div class="field"><label>Countries</label><select class="input" id="rCountries" multiple size="6">' +
+          countries.map(c=>'<option value="'+esc(c)+'" '+(selC.indexOf(c)>=0?'selected':'')+'>'+esc(c)+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>Segments</label><select class="input" id="rSegments" multiple size="'+Math.min(6,Math.max(3,segs.length||3))+'">' +
+          (segs.length? segs.map(s=>'<option value="'+esc(s)+'" '+(selI.indexOf(s)>=0?'selected':'')+'>'+esc(s)+'</option>').join('') : '<option disabled>No segments defined yet</option>') + '</select></div>' +
+        '<div class="field"><label>Assign to <span class="req">*</span></label><select class="input" id="rOwner">' +
+          sellers.map(u=>'<option value="'+u.id+'" '+(r&&r.owner===u.id?'selected':'')+'>'+esc(u.name||u.email)+'</option>').join('') + '</select></div>' +
+        '<button class="btn primary" id="rSave">'+(r?'Save rule':'Add rule')+'</button>' +
+        '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>';
+    };
+    const vals = id => Array.from(document.getElementById(id).selectedOptions).map(o=>o.value);
+
+    shell('Assignment rules', rules.length + ' rule(s)', body, '#/admin', { back:'#/admin', bind(){
+      app.querySelectorAll('[data-r]').forEach(sw => sw.onclick = () => { const r=DB.assignmentRules.find(x=>x.id===sw.getAttribute('data-r')); r.active=!r.active; saveState(); adminRules(); });
+      app.querySelectorAll('[data-up]').forEach(b => b.onclick = () => {
+        const id=b.getAttribute('data-up'); const arr=DB.assignmentRules.slice().sort((a,b2)=>a.priority-b2.priority);
+        const i=arr.findIndex(x=>x.id===id); if(i<=0) return;
+        const tmp=arr[i-1].priority; arr[i-1].priority=arr[i].priority; arr[i].priority=tmp;
+        saveState(); adminRules();
+      });
+      app.querySelectorAll('[data-delr]').forEach(b => b.onclick = () => {
+        const id=b.getAttribute('data-delr');
+        DB.assignmentRules = DB.assignmentRules.filter(x=>x.id!==id);
+        DB.assignmentRules.sort((a,b2)=>a.priority-b2.priority).forEach((r,i)=>r.priority=i+1);
+        saveState(); toast('Rule deleted','ok'); adminRules();
+      });
+      app.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
+        const r = DB.assignmentRules.find(x=>x.id===b.getAttribute('data-edit'));
+        modal(ruleForm(r));
+        setTimeout(()=>{ const s=document.getElementById('rSave'); if(s) s.onclick=()=>{
+          r.countries=vals('rCountries'); r.interests=vals('rSegments'); r.owner=document.getElementById('rOwner').value;
+          saveState(); closeModal(); toast('Rule saved','ok'); adminRules();
+        }; },0);
+      });
+      $('#newRule').onclick = () => {
+        if (!sellers.length) { toast('Add a user first','err'); return; }
+        modal(ruleForm(null));
+        setTimeout(()=>{ const s=document.getElementById('rSave'); if(s) s.onclick=()=>{
+          const nr={ id:'r'+Date.now(), priority:(DB.assignmentRules.length+1), countries:vals('rCountries'), interests:vals('rSegments'), owner:document.getElementById('rOwner').value, active:true };
+          if(!nr.countries.length && !nr.interests.length){ toast('Pick at least one country or segment','err'); return; }
+          DB.assignmentRules.push(nr); saveState(); closeModal(); toast('Rule added','ok'); adminRules();
+        }; },0);
+      };
+      $('#fallback').onchange = () => { DB.fallbackOwner = $('#fallback').value; saveState(); toast('Default owner updated','ok'); };
+      $('#ovr').onclick = () => { DB.allowOverride=!DB.allowOverride; saveState(); toast('Override '+(DB.allowOverride?'enabled':'disabled'),'ok'); adminRules(); };
     }});
   }
 
@@ -822,25 +927,63 @@
     }});
   }
 
+  const fmtDates = e => {
+    if (!e.startDate && !e.endDate) return e.dates || 'no dates set';
+    const f = d => d ? new Date(d + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+    return e.startDate && e.endDate && e.startDate !== e.endDate ? f(e.startDate) + ' – ' + f(e.endDate) : f(e.startDate || e.endDate);
+  };
+
   function adminEvents() {
     const lists = brevoLists;
+    const hasKey = !!DB.brevoApiKey;
     const listName = id => { if (!id) return null; const x = (lists || []).find(l => l.id === id); return x ? x.name : ('list #' + id); };
     const listSelect = e => {
-      if (!lists) return '<p class="hint" style="margin:10px 0 0">Loading Brevo lists…</p>';
+      if (!hasKey) return '<p class="hint" style="margin:10px 0 0">Add your Brevo API key in <b>Admin → Destinations</b> to choose a destination list.</p>';
+      if (!lists) return '<p class="hint" style="margin:10px 0 0">Loading your Brevo lists…</p>';
+      if (!lists.length) return '<p class="hint" style="margin:10px 0 0">No lists found in your Brevo account.</p>';
       return '<div class="field" style="margin:10px 0 0"><label>Brevo destination list</label><select class="input" data-evlist="'+e.id+'"><option value="">— none —</option>' +
         lists.map(l => '<option value="'+l.id+'" '+(e.brevoListId===l.id?'selected':'')+'>'+esc(l.name)+' (#'+l.id+')</option>').join('') + '</select></div>';
     };
-    const body = DB.events.map(e => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(e.name)+'</h3><span class="pill '+(e.status==='open'?'green':'gray')+'">'+esc(e.status)+'</span></div>' +
-      '<p class="hint" style="margin:6px 0 0">'+esc(e.dates)+'</p>' +
-      '<div class="tags" style="margin-top:8px">'+['provenienza','country','interesse'].map(k=>e.preset[k]?'<span class="pill indigo">'+esc(e.preset[k])+'</span>':'').join('')+'</div>' +
-      (e.brevoListId ? '<div class="tags" style="margin-top:6px"><span class="pill green">'+ic.send+' Brevo: '+esc(listName(e.brevoListId))+'</span></div>' : '') +
-      listSelect(e) +
-      '</div>').join('') +
-      '<button class="btn primary" id="newEv">'+ic.plus+' New event</button>';
-    shell('Events', 'Presets & Brevo list per event', body, null, { back:'#/admin', bind(){
-      if (!lists) loadBrevoLists().then(r => { if (r && location.hash.indexOf('#/admin/events') === 0) adminEvents(); });
-      app.querySelectorAll('[data-evlist]').forEach(sel => sel.onchange = () => { const e=DB.events.find(x=>x.id===sel.getAttribute('data-evlist')); e.brevoListId = sel.value ? parseInt(sel.value,10) : null; saveState(); toast(e.brevoListId?('Routing to '+listName(e.brevoListId)):'List cleared','ok'); adminEvents(); });
-      $('#newEv').onclick = () => modal('<h3>New event</h3><div class="field"><label>Name</label><input class="input" id="evn" placeholder="Trade show 2026"></div><div class="field"><label>Dates</label><input class="input" id="evd" placeholder="Sep 1–3, 2026"></div><button class="btn primary" id="evAdd">Create</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>') || setTimeout(()=>{ const a=document.getElementById('evAdd'); if(a) a.onclick=()=>{ const ne={id:'e'+Date.now(),name:document.getElementById('evn').value||'New event',dates:document.getElementById('evd').value||'',status:'open',preset:{provenienza:'',country:'',interesse:''},brevoListId:null}; DB.events.push(ne); if(!S.activeEventId) S.activeEventId=ne.id; saveState(); closeModal(); toast('Event created','ok'); adminEvents(); }; },0);
+    const presetChips = e => {
+      const chips = [e.preset.provenienza, e.preset.country, e.preset.interesse].filter(Boolean);
+      return chips.length ? '<div class="tags" style="margin-top:8px">' + chips.map(c => '<span class="pill indigo">'+esc(c)+'</span>').join('') + '</div>' : '';
+    };
+    const list = DB.events.length
+      ? DB.events.map(e => '<div class="card">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(e.name)+'</h3>' +
+            (e.id===S.activeEventId ? '<span class="pill green">active</span>' : '<button class="pill gray" data-setactive="'+e.id+'" style="border:none;cursor:pointer">set active</button>') + '</div>' +
+          '<p class="hint" style="margin:6px 0 0">'+esc(fmtDates(e))+'</p>' +
+          presetChips(e) +
+          (e.brevoListId ? '<div class="tags" style="margin-top:6px"><span class="pill green">'+ic.send+' Brevo: '+esc(listName(e.brevoListId))+'</span></div>' : '') +
+          listSelect(e) +
+          '<div class="btnrow" style="margin-top:12px"><button class="btn ghost sm" data-delev="'+e.id+'">Delete</button></div>' +
+        '</div>').join('')
+      : '<div class="list-empty">'+ic.empty+'<p>No events yet. Create your first trade show or event.</p></div>';
+    const body = '<div class="banner">'+ic.info+'<div>An event groups the cards you scan: it pre-fills the qualification fields and routes leads into the Brevo list you pick here.</div></div>' +
+      list + '<button class="btn primary" id="newEv" style="margin-top:6px">'+ic.plus+' Create new event</button>';
+    shell('Events', DB.events.length + ' event(s)', body, '#/admin', { back:'#/admin', bind(){
+      if (hasKey && !lists) loadBrevoLists().then(r => { if (r && location.hash.indexOf('#/admin/events') === 0) adminEvents(); });
+      app.querySelectorAll('[data-evlist]').forEach(sel => sel.onchange = () => { const e=DB.events.find(x=>x.id===sel.getAttribute('data-evlist')); e.brevoListId = sel.value ? parseInt(sel.value,10) : null; saveState(); toast(e.brevoListId?('Leads will go to '+listName(e.brevoListId)):'List cleared','ok'); adminEvents(); });
+      app.querySelectorAll('[data-setactive]').forEach(b => b.onclick = () => { S.activeEventId = b.getAttribute('data-setactive'); saveState(); toast('Active event updated','ok'); adminEvents(); });
+      app.querySelectorAll('[data-delev]').forEach(b => b.onclick = () => {
+        const id = b.getAttribute('data-delev');
+        const used = DB.leads.filter(l => l.eventId === id).length;
+        modal('<h3>Delete event?</h3><p class="hint">'+(used ? used + ' lead(s) were captured at this event — they will be kept but lose the event reference.' : 'This event has no leads.')+'</p><button class="btn danger" id="delEvYes">Delete event</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>');
+        setTimeout(()=>{ const y=document.getElementById('delEvYes'); if(y) y.onclick=()=>{ DB.events = DB.events.filter(x=>x.id!==id); if(S.activeEventId===id) S.activeEventId = DB.events.length?DB.events[0].id:null; saveState(); closeModal(); toast('Event deleted','ok'); adminEvents(); }; },0);
+      });
+      $('#newEv').onclick = () => {
+        modal('<h3>Create new event</h3><p class="hint">You can set presets and the Brevo list right after.</p>' +
+          '<div class="field"><label>Event name <span class="req">*</span></label><input class="input" id="evn" placeholder="MECSPE 2026"></div>' +
+          '<div class="grid2"><div class="field"><label>Start date</label><input class="input" id="evStart" type="date"></div>' +
+          '<div class="field"><label>End date</label><input class="input" id="evEnd" type="date"></div></div>' +
+          '<button class="btn primary" id="evAdd">Create event</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>');
+        setTimeout(()=>{ const a=document.getElementById('evAdd'); if(a) a.onclick=()=>{
+          const nm=(document.getElementById('evn').value||'').trim();
+          if(!nm){ toast('Enter an event name','err'); return; }
+          const ne={id:'e'+Date.now(),name:nm,startDate:document.getElementById('evStart').value||'',endDate:document.getElementById('evEnd').value||'',dates:'',status:'open',preset:{provenienza:'',country:'',interesse:''},brevoListId:null};
+          DB.events.push(ne); if(!S.activeEventId) S.activeEventId=ne.id; saveState(); closeModal(); toast('Event created','ok'); adminEvents();
+        }; },0);
+      };
     }});
   }
 
@@ -870,7 +1013,8 @@
       case '#/dashboard': return dashScreen();
       case '#/admin': return adminScreen();
       case '#/admin/team': return adminTeam();
-      case '#/admin/lists': return adminLists();
+      case '#/admin/sources': return adminPickList('provenienza');
+      case '#/admin/segments': return adminPickList('interesse');
       case '#/admin/rules': return adminRules();
       case '#/admin/dest': return adminDest();
       case '#/admin/events': return adminEvents();

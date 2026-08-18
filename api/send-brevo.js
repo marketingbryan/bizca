@@ -1,5 +1,6 @@
 /* Bizca — serverless proxy to Brevo (create/update contact, dedupe by email).
-   The Brevo API key stays server-side (Vercel env var BREVO_API_KEY). */
+   The API key is supplied per workspace by the company admin and is never
+   shared between tenants. */
 
 function readRaw(req) {
   return new Promise((resolve, reject) => {
@@ -31,17 +32,15 @@ module.exports = async (req, res) => {
   try {
     let body = req.body;
     if (!body || typeof body === 'string') { const raw = await readRaw(req); body = raw ? JSON.parse(raw) : {}; }
-    const key = (body.apiKey || '').trim() || process.env.BREVO_API_KEY;
-    if (!key) { res.status(500).json({ error: 'No Brevo API key — set it in Admin → Destinations, or as BREVO_API_KEY on the server' }); return; }
+    const key = (body.apiKey || '').trim();
+    if (!key) { res.status(400).json({ error: 'No Brevo API key for this workspace — add it in Admin → Destinations' }); return; }
     const lead = body.lead || {};
     const email = (lead.email || '').trim();
     if (!email) { res.status(400).json({ error: 'Lead has no email — Brevo requires an email address' }); return; }
 
-    // Destination list: per-request listId (from the lead's event) wins, else BREVO_LIST_ID env
+    // Destination list comes from the lead's event (tenant-scoped only)
     const bodyListId = parseInt(body.listId, 10);
-    const envListId = parseInt(process.env.BREVO_LIST_ID || '', 10);
-    const chosen = Number.isFinite(bodyListId) ? bodyListId : (Number.isFinite(envListId) ? envListId : undefined);
-    const listIds = chosen !== undefined ? [chosen] : undefined;
+    const listIds = Number.isFinite(bodyListId) ? [bodyListId] : undefined;
 
     // Full attribute set: standard + Bizca custom attributes
     const full = {

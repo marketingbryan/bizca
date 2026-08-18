@@ -14,8 +14,8 @@ function readRaw(req) {
 module.exports = async (req, res) => {
   let body = req.body;
   if (!body || typeof body === 'string') { try { const raw = await readRaw(req); body = raw ? JSON.parse(raw) : {}; } catch (e) { body = {}; } }
-  const key = (body.apiKey || '').trim() || process.env.BREVO_API_KEY;
-  if (!key) { res.status(500).json({ error: 'No Brevo API key — set it in Admin → Destinations, or as BREVO_API_KEY on the server' }); return; }
+  const key = (body.apiKey || '').trim();
+  if (!key) { res.status(400).json({ error: 'No Brevo API key for this workspace — add it in Admin → Destinations' }); return; }
 
   const created = [], existed = [], failed = [];
   for (const name of ATTRS) {
