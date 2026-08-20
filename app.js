@@ -1,9 +1,62 @@
-/* Bizca — prototype app logic (vanilla JS, in-memory mock). */
+/* Bizca — app logic. The shared backend is the source of truth;
+   localStorage is only an offline cache of what the server sent. */
 (function () {
   const DB = window.DB, S = window.SESSION;
   const app = document.getElementById('app');
   const modalRoot = document.getElementById('modal-root');
   let scanIndex = 0, batchMode = false;
+
+  /* ---------- backend ---------- */
+  const API = 'https://bizca-production.up.railway.app';
+  const TOKEN_KEY = 'bizca-token';
+  const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } };
+  const setToken = t => { try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} };
+
+  async function api(method, path, body) {
+    const res = await fetch(API + path, {
+      method,
+      headers: Object.assign({ 'Content-Type': 'application/json' }, getToken() ? { Authorization: 'Bearer ' + getToken() } : {}),
+      body: body ? JSON.stringify(body) : undefined
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) {}
+    if (res.status === 401) { setToken(''); S.user = null; }
+    if (!res.ok) { const err = new Error(data.error || ('Request failed (' + res.status + ')')); err.status = res.status; err.data = data; throw err; }
+    return data;
+  }
+
+  // Pull the whole workspace from the server into the in-memory model
+  async function pullState() {
+    const d = await api('GET', '/state');
+    DB.company = Object.assign({}, d.company, { configured: true });
+    DB.users = d.users || [];
+    DB.events = (d.events || []).map(e => Object.assign({}, e, { preset: e.preset || { provenienza: '', country: '', interesse: '' } }));
+    DB.pickLists = d.picklists || { provenienza: [], interesse: [] };
+    DB.assignmentRules = d.rules || [];
+    DB.leads = d.leads || [];
+    DB.syncLog = d.syncLog || [];
+    const s = d.settings || {};
+    DB.autoSend = s.autoSend !== false;
+    DB.requireConsent = !!s.requireConsent;
+    DB.allowOverride = s.allowOverride !== false;
+    DB.brevoApiKey = s.brevoApiKey || '';
+    DB.fallbackOwner = s.fallbackOwner || (DB.users[0] && DB.users[0].id) || null;
+    S.user = DB.users.find(u => u.id === d.me.id) || null;
+    if (!S.activeEventId || !DB.events.some(e => e.id === S.activeEventId)) S.activeEventId = DB.events.length ? DB.events[0].id : null;
+    saveState();
+    return d;
+  }
+
+  // Fire-and-forget server writes: the UI stays responsive, errors surface as a toast
+  function push(method, path, body) {
+    return api(method, path, body).catch(e => { if (e.status !== 401) toast(e.message, 'err'); throw e; });
+  }
+  // Persist one lead (create or update). Silent on failure: the local copy is kept
+  // and will be retried on the next save.
+  function saveLead(l) {
+    if (!getToken()) return Promise.resolve();
+    return api('PUT', '/leads/' + l.id, l).catch(() => {});
+  }
 
   /* ---------- helpers ---------- */
   const $ = sel => document.querySelector(sel);
@@ -53,11 +106,12 @@
       ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
       if (d.session) {
         if (d.session.activeEventId) S.activeEventId = d.session.activeEventId;
-        if (d.session.userId) { const u = DB.users.find(x => x.id === d.session.userId); if (u) S.user = u; }
+        // only trust a cached session if we still hold a token
+        if (d.session.userId && getToken()) { const u = DB.users.find(x => x.id === d.session.userId); if (u) S.user = u; }
       }
     } catch (e) {}
   }
-  function resetState() { try { localStorage.removeItem(STORE_KEY); } catch (e) {} location.hash = '#/login'; location.reload(); }
+  function resetState() { try { localStorage.removeItem(STORE_KEY); localStorage.removeItem(TOKEN_KEY); } catch (e) {} location.hash = '#/welcome'; location.reload(); }
 
   /* ---------- connectivity & install ---------- */
   let deferredPrompt = null;
@@ -92,6 +146,8 @@
     DB.syncLog.unshift({ leadId: l.id, dest: 'Excel', ok: true, ts: Date.now(), msg: 'Row added (simulated — Graph not configured)' });
     if (r.ok) { l.status = 'Sent'; l.error = null; l.queuedOffline = false; }
     else { l.status = 'Error'; l.error = 'Brevo: ' + r.msg; }
+    saveLead(l);
+    api('POST', '/sync-log', { leadId: l.id, dest: 'Brevo', ok: r.ok, msg: r.ok ? (r.action || 'sent') : r.msg }).catch(() => {});
     return r.ok;
   }
   async function flushQueued() {
@@ -240,6 +296,7 @@
           '<h3 style="margin-top:18px">Your admin account</h3>' +
           '<div class="field"><label>Full name <span class="req">*</span></label><input class="input" id="adName" placeholder="Jane Doe"></div>' +
           '<div class="field"><label>Work email <span class="req">*</span></label><input class="input" id="adEmail" type="email" placeholder="jane@acme.com"></div>' +
+          '<div class="field"><label>Password <span class="req">*</span></label><input class="input" id="adPwd" type="password" placeholder="At least 8 characters" autocomplete="new-password"></div>' +
           '<label class="select-item" for="privacyOk" style="cursor:pointer;margin-top:14px">' +
             '<input type="checkbox" id="privacyOk" style="width:20px;height:20px;accent-color:var(--indigo)">' +
             '<span style="font-size:13px;color:var(--slate)">I have read and accept the <a href="https://www.bryan.it/privacy-policy" target="_blank" rel="noopener">privacy policy</a> and agree to the processing of my data. <span class="req">*</span></span>' +
@@ -249,21 +306,44 @@
         '</div>' +
       '</div>';
     const bw = $('#backWelcome'); if (bw) bw.onclick = () => go('#/welcome');
-    $('#doSetup').onclick = () => {
+    $('#doSetup').onclick = async () => {
       const name = ($('#coName').value || '').trim();
       const domain = ($('#coDomain').value || '').trim().toLowerCase().replace(/^@/, '');
       const adName = ($('#adName').value || '').trim();
       const adEmail = ($('#adEmail').value || '').trim().toLowerCase();
-      if (!name || !domain || !adName || !adEmail) { toast('Fill in the required fields', 'err'); return; }
+      const pwd = $('#adPwd').value || '';
+      if (!name || !domain || !adName || !adEmail || !pwd) { toast('Fill in the required fields', 'err'); return; }
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adEmail)) { toast('Enter a valid email address', 'err'); return; }
+      if (pwd.length < 8) { toast('Password must be at least 8 characters', 'err'); return; }
       if (!$('#privacyOk').checked) { toast('Please accept the privacy policy to continue', 'err'); return; }
-      DB.company = { id: domain.replace(/\W+/g, '_'), name: name, domain: domain, locale: 'en', configured: true, privacyAcceptedAt: Date.now() };
-      DB.users = [{ id: 'u_' + Date.now(), name: adName, email: adEmail, role: 'admin', status: 'active' }];
-      DB.fallbackOwner = DB.users[0].id;
-      S.user = DB.users[0];
-      saveState();
-      toast('Workspace created — welcome to Bizca', 'ok');
-      go('#/home');
+      const btn = $('#doSetup'); btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Creating…';
+      try {
+        await api('POST', '/auth/register', { company: name, domain, name: adName, email: adEmail, password: pwd, privacy: true });
+        checkEmailScreen(adEmail);
+      } catch (e) {
+        toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'Create workspace';
+      }
+    };
+  }
+
+  /* ---------- "check your inbox" after registering ---------- */
+  function checkEmailScreen(email) {
+    app.innerHTML =
+      '<div class="login">' +
+        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>One last step</p></div>' +
+        '<div class="card" style="box-shadow:var(--shadow-lg);text-align:center">' +
+          '<h3>Check your inbox</h3>' +
+          '<p class="hint">We sent a confirmation link to <b>' + esc(email) + '</b>. Click it to activate your workspace, then sign in.</p>' +
+          '<button class="btn primary" id="goLogin">Go to sign in</button>' +
+          '<button class="btn ghost" id="resend" style="margin-top:10px">Resend email</button>' +
+        '</div>' +
+      '</div>';
+    $('#goLogin').onclick = () => go('#/login');
+    $('#resend').onclick = async () => {
+      const b = $('#resend'); b.disabled = true;
+      try { await api('POST', '/auth/resend', { email }); toast('Email sent again', 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+      b.disabled = false;
     };
   }
 
@@ -291,17 +371,17 @@
       const email = ($('#email').value || '').trim().toLowerCase();
       const pwd = $('#pwd').value || '';
       if (!email || !pwd) { toast('Enter your work email and password', 'err'); return; }
-      const u = DB.users.find(x => x.email.toLowerCase() === email && x.status === 'active');
-      if (!u) { toast('Account not found — ask your admin to invite you', 'err'); return; }
       const btn = $('#login'); if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Signing in…'; }
       const reset = () => { if (btn) { btn.disabled = false; btn.textContent = 'Sign in'; } };
       try {
-        const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: pwd }) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || 'Sign-in unavailable');
-        if (!d.ok) { toast('Wrong password', 'err'); reset(); return; }
-        S.user = u; saveState(); go('#/home');
-      } catch (e) { toast(e.message, 'err'); reset(); }
+        const d = await api('POST', '/auth/login', { email, password: pwd });
+        setToken(d.token);
+        await pullState();
+        go('#/home');
+      } catch (e) {
+        if (e.data && e.data.needsVerification) { checkEmailScreen(email); return; }
+        toast(e.message, 'err'); reset();
+      }
     };
     $('#sso').onclick = () => toast('Microsoft SSO is enabled once your IT completes the Azure AD setup');
     $('#login').onclick = signInEmail;
@@ -338,14 +418,11 @@
   window.onGoogleCredential = onGoogleCredential;
   async function onGoogleCredential(resp) {
     try {
-      const r = await fetch('/api/google-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential: resp.credential }) });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok || !d.ok) throw new Error(d.error || 'Google sign-in failed');
-      const email = (d.email || '').toLowerCase();
-      const u = DB.users.find(x => x.email.toLowerCase() === email && x.status === 'active');
-      if (!u) { toast('No Bizca account for ' + email + ' — ask your admin to invite you', 'err'); return; }
-      if (!u.name && d.name) u.name = d.name;
-      S.user = u; saveState(); toast('Signed in with Google', 'ok'); go('#/home');
+      const d = await api('POST', '/auth/google', { credential: resp.credential });
+      setToken(d.token);
+      await pullState();
+      toast('Signed in with Google', 'ok');
+      go('#/home');
     } catch (e) { toast(e.message, 'err'); }
   }
 
@@ -393,7 +470,7 @@
             '<div class="kv" style="border:none"><span class="k">Company</span><span class="v">'+esc(DB.company.name)+'</span></div>' +
             '<button class="btn danger" id="doLogout" style="margin-top:14px">Sign out</button>' +
             '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Close</button>');
-          setTimeout(()=>{ const b=document.getElementById('doLogout'); if(b) b.onclick=()=>{ S.user=null; saveState(); closeModal(); go('#/login'); }; },0);
+          setTimeout(()=>{ const b=document.getElementById('doLogout'); if(b) b.onclick=()=>{ setToken(''); S.user=null; DB.leads=[]; saveState(); closeModal(); go('#/login'); }; },0);
         };
         const inst = $('#installApp'); if (inst) inst.onclick = async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); try { await deferredPrompt.userChoice; } catch(e){} deferredPrompt = null; render(); };
       }});
@@ -491,7 +568,7 @@
     };
     if (lead.country && lead.interesse) lead.ownerId = assign(lead.country, lead.interesse).owner;
     DB.leads.unshift(lead);
-    saveState();
+    saveState(); saveLead(lead);
     if (isReal) toast('Card read with AI', 'ok');
     else toast('AI could not read the card — fill fields manually' + (errMsg ? ' (' + errMsg + ')' : ''), 'err');
     if (batchMode) scanScreen();
@@ -553,9 +630,9 @@
         $('#ruleHint').textContent = ruleSummary(assign(l.country, l.interesse).rule);
       });
       const ow = app.querySelector('[data-owner]'); if (ow) ow.onchange = () => { l.ownerId = ow.value; l.override = true; };
-      const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; saveState(); toast('Draft saved','ok'); go('#/leads'); };
+      const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; saveState(); saveLead(l); toast('Draft saved','ok'); go('#/leads'); };
       const sb = $('#send'); if (sb) sb.onclick = () => sendLead(l);
-      const rs = $('#reSign'); if (rs) rs.onclick = () => { l.consentSignature = null; l.consentAt = null; saveState(); leadScreen(l.id); };
+      const rs = $('#reSign'); if (rs) rs.onclick = () => { l.consentSignature = null; l.consentAt = null; saveState(); saveLead(l); leadScreen(l.id); };
       initSigPad(l);
     }});
   }
@@ -596,7 +673,7 @@
     const clr = $('#sigClear'); if (clr) clr.onclick = () => { ctx.clearRect(0, 0, cv.width, cv.height); dirty = false; };
     const save = $('#sigSave'); if (save) save.onclick = () => {
       if (!dirty) { toast('Please sign first', 'err'); return; }
-      l.consentSignature = cv.toDataURL('image/png'); l.consentAt = Date.now(); saveState(); toast('Consent captured', 'ok'); leadScreen(l.id);
+      l.consentSignature = cv.toDataURL('image/png'); l.consentAt = Date.now(); saveState(); saveLead(l); toast('Consent captured', 'ok'); leadScreen(l.id);
     };
   }
   function optList(arr, sel) { return '<option value="">— select —</option>' + arr.map(v => '<option '+(v===sel?'selected':'')+'>'+esc(v)+'</option>').join(''); }
@@ -663,8 +740,8 @@
     shell('Batch queue', q.length+' card(s)', body, null, { back:'#/home', bind(){
       app.querySelectorAll('[data-sel]').forEach(c => c.onclick = () => { const id=c.getAttribute('data-sel'); batchSel.has(id)?batchSel.delete(id):batchSel.add(id); batchScreen(); });
       app.querySelectorAll('[data-open]').forEach(m => m.onclick = () => go('#/lead?id=' + m.getAttribute('data-open')));
-      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast('No active event','err'); return; } q.forEach(l=>{ if(ev.preset.provenienza)l.provenienza=ev.preset.provenienza; if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(requiredFilled(l)){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; l.status='Ready';} }); toast('Preset applied to queue','ok'); batchScreen(); };
-      const aa=$('#autoAssign'); if(aa) aa.onclick = () => { let n=0; q.forEach(l=>{ if(l.country&&l.interesse){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; if(requiredFilled(l))l.status='Ready'; n++;} }); toast(n+' lead(s) assigned','ok'); batchScreen(); };
+      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast('No active event','err'); return; } q.forEach(l=>{ if(ev.preset.provenienza)l.provenienza=ev.preset.provenienza; if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(requiredFilled(l)){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; l.status='Ready';} }); q.forEach(saveLead); toast('Preset applied to queue','ok'); batchScreen(); };
+      const aa=$('#autoAssign'); if(aa) aa.onclick = () => { let n=0; q.forEach(l=>{ if(l.country&&l.interesse){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; if(requiredFilled(l))l.status='Ready'; n++;} }); q.forEach(saveLead); toast(n+' lead(s) assigned','ok'); batchScreen(); };
       const ss=$('#sendSel'); if(ss) ss.onclick = async () => {
         if(!batchSel.size){ toast('Select at least one lead','err'); return; }
         if(!S.online){ let q2=0; batchSel.forEach(id=>{ const l=DB.leads.find(x=>x.id===id); if(l&&requiredFilled(l)){ l.status='Ready'; l.queuedOffline=true; q2++; } }); batchSel.clear(); saveState(); toast(q2+' queued (offline) — will sync','' ); batchScreen(); return; }
@@ -750,12 +827,12 @@
         const u=DB.users.find(x=>x.id===sw.getAttribute('data-u'));
         if (u.id===me.id) { toast('You cannot disable your own account','err'); return; }
         if (u.role==='admin' && u.status==='active' && DB.users.filter(x=>x.role==='admin'&&x.status==='active').length<=1) { toast('Keep at least one active admin','err'); return; }
-        u.status = u.status==='active'?'disabled':'active'; saveState(); toast(esc(u.name||u.email)+' '+u.status,'ok'); adminTeam();
+        u.status = u.status==='active'?'disabled':'active'; saveState(); push('PATCH','/users/'+u.id,{status:u.status}); toast(esc(u.name||u.email)+' '+u.status,'ok'); adminTeam();
       });
       app.querySelectorAll('[data-role]').forEach(b => b.onclick = () => {
         const u=DB.users.find(x=>x.id===b.getAttribute('data-role'));
         if (u.role==='admin' && DB.users.filter(x=>x.role==='admin'&&x.status==='active').length<=1) { toast('Keep at least one admin','err'); return; }
-        u.role = u.role==='admin'?'seller':'admin'; saveState(); toast(esc(u.name||u.email)+' is now '+u.role,'ok'); adminTeam();
+        u.role = u.role==='admin'?'seller':'admin'; saveState(); push('PATCH','/users/'+u.id,{role:u.role}); toast(esc(u.name||u.email)+' is now '+u.role,'ok'); adminTeam();
       });
       $('#invite').onclick = () => {
         modal('<h3>Add user</h3><p class="hint">They can then sign in with Google or their work email.</p>' +
@@ -769,8 +846,8 @@
           const role=document.getElementById('invRole').value;
           if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ toast('Enter a valid email','err'); return; }
           if(DB.users.some(u=>u.email.toLowerCase()===email)){ toast('That user already exists','err'); return; }
-          DB.users.push({id:'u'+Date.now(),name:name||email.split('@')[0],email:email,role:role,status:'active'});
-          saveState(); closeModal(); toast('User added','ok'); adminTeam();
+          push('POST','/users',{name:name,email:email,role:role})
+            .then(r=>{ DB.users.push(r.user); saveState(); closeModal(); toast('User added — invitation email sent','ok'); adminTeam(); }).catch(()=>{});
         }; },0);
       };
     }});
@@ -793,20 +870,21 @@
         '<div class="field" style="margin-bottom:10px"><input class="input" id="newVal" placeholder="'+esc(meta.ph)+'"></div>' +
         '<button class="btn primary" id="addVal">'+ic.plus+' Add</button></div>';
     shell(meta.title, values.length + ' value(s)', body, '#/admin', { back:'#/admin', bind(){
-      app.querySelectorAll('[data-toggle]').forEach(sw => sw.onclick = () => { const v=values.find(x=>x.id===sw.getAttribute('data-toggle')); v.active=!v.active; saveState(); adminPickList(type); });
+      app.querySelectorAll('[data-toggle]').forEach(sw => sw.onclick = () => { const v=values.find(x=>x.id===sw.getAttribute('data-toggle')); v.active=!v.active; saveState(); push('PATCH','/picklists/'+v.id,{active:v.active}); adminPickList(type); });
       app.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
         const v = values.find(x=>x.id===b.getAttribute('data-del'));
         const used = DB.leads.filter(l => (type==='provenienza'?l.provenienza:l.interesse) === v.value).length;
         modal('<h3>Delete "'+esc(v.value)+'"?</h3><p class="hint">'+(used ? 'It is used by '+used+' lead(s); their existing value is kept. ' : '')+'It will no longer be selectable.</p>' +
           '<button class="btn danger" id="delYes">Delete</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>');
-        setTimeout(()=>{ const y=document.getElementById('delYes'); if(y) y.onclick=()=>{ DB.pickLists[type]=values.filter(x=>x.id!==v.id); saveState(); closeModal(); toast('Value deleted','ok'); adminPickList(type); }; },0);
+        setTimeout(()=>{ const y=document.getElementById('delYes'); if(y) y.onclick=()=>{ DB.pickLists[type]=values.filter(x=>x.id!==v.id); saveState(); push('DELETE','/picklists/'+v.id); closeModal(); toast('Value deleted','ok'); adminPickList(type); }; },0);
       });
       const add = () => {
         const inp = $('#newVal'); const val = (inp.value||'').trim();
         if (!val) { toast('Type a value first','err'); return; }
         if (values.some(x => x.value.toLowerCase() === val.toLowerCase())) { toast('That value already exists','err'); return; }
-        DB.pickLists[type].push({ id: type[0] + Date.now(), value: val, active: true });
-        saveState(); toast('Value added','ok'); adminPickList(type);
+        push('POST','/picklists',{ kind: type==='provenienza'?'source':'segment', value: val })
+          .then(r => { DB.pickLists[type].push(r.item); saveState(); toast('Value added','ok'); adminPickList(type); })
+          .catch(()=>{});
       };
       $('#addVal').onclick = add;
       $('#newVal').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
@@ -858,25 +936,25 @@
     const vals = id => Array.from(document.getElementById(id).selectedOptions).map(o=>o.value);
 
     shell('Assignment rules', rules.length + ' rule(s)', body, '#/admin', { back:'#/admin', bind(){
-      app.querySelectorAll('[data-r]').forEach(sw => sw.onclick = () => { const r=DB.assignmentRules.find(x=>x.id===sw.getAttribute('data-r')); r.active=!r.active; saveState(); adminRules(); });
+      app.querySelectorAll('[data-r]').forEach(sw => sw.onclick = () => { const r=DB.assignmentRules.find(x=>x.id===sw.getAttribute('data-r')); r.active=!r.active; saveState(); push('PATCH','/rules/'+r.id,{active:r.active}); adminRules(); });
       app.querySelectorAll('[data-up]').forEach(b => b.onclick = () => {
         const id=b.getAttribute('data-up'); const arr=DB.assignmentRules.slice().sort((a,b2)=>a.priority-b2.priority);
         const i=arr.findIndex(x=>x.id===id); if(i<=0) return;
         const tmp=arr[i-1].priority; arr[i-1].priority=arr[i].priority; arr[i].priority=tmp;
-        saveState(); adminRules();
+        saveState(); push('PATCH','/rules/'+arr[i-1].id,{priority:arr[i-1].priority}); push('PATCH','/rules/'+arr[i].id,{priority:arr[i].priority}); adminRules();
       });
       app.querySelectorAll('[data-delr]').forEach(b => b.onclick = () => {
         const id=b.getAttribute('data-delr');
         DB.assignmentRules = DB.assignmentRules.filter(x=>x.id!==id);
         DB.assignmentRules.sort((a,b2)=>a.priority-b2.priority).forEach((r,i)=>r.priority=i+1);
-        saveState(); toast('Rule deleted','ok'); adminRules();
+        saveState(); push('DELETE','/rules/'+id); toast('Rule deleted','ok'); adminRules();
       });
       app.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
         const r = DB.assignmentRules.find(x=>x.id===b.getAttribute('data-edit'));
         modal(ruleForm(r));
         setTimeout(()=>{ const s=document.getElementById('rSave'); if(s) s.onclick=()=>{
           r.countries=vals('rCountries'); r.interests=vals('rSegments'); r.owner=document.getElementById('rOwner').value;
-          saveState(); closeModal(); toast('Rule saved','ok'); adminRules();
+          saveState(); push('PATCH','/rules/'+r.id,{countries:r.countries,interests:r.interests,owner:r.owner}); closeModal(); toast('Rule saved','ok'); adminRules();
         }; },0);
       });
       $('#newRule').onclick = () => {
@@ -885,11 +963,12 @@
         setTimeout(()=>{ const s=document.getElementById('rSave'); if(s) s.onclick=()=>{
           const nr={ id:'r'+Date.now(), priority:(DB.assignmentRules.length+1), countries:vals('rCountries'), interests:vals('rSegments'), owner:document.getElementById('rOwner').value, active:true };
           if(!nr.countries.length && !nr.interests.length){ toast('Pick at least one country or segment','err'); return; }
-          DB.assignmentRules.push(nr); saveState(); closeModal(); toast('Rule added','ok'); adminRules();
+          push('POST','/rules',{countries:nr.countries,interests:nr.interests,owner:nr.owner,priority:nr.priority})
+            .then(r=>{ DB.assignmentRules.push(r.rule); saveState(); closeModal(); toast('Rule added','ok'); adminRules(); }).catch(()=>{});
         }; },0);
       };
-      $('#fallback').onchange = () => { DB.fallbackOwner = $('#fallback').value; saveState(); toast('Default owner updated','ok'); };
-      $('#ovr').onclick = () => { DB.allowOverride=!DB.allowOverride; saveState(); toast('Override '+(DB.allowOverride?'enabled':'disabled'),'ok'); adminRules(); };
+      $('#fallback').onchange = () => { DB.fallbackOwner = $('#fallback').value; saveState(); push('PATCH','/settings',{fallbackOwner:DB.fallbackOwner}); toast('Default owner updated','ok'); };
+      $('#ovr').onclick = () => { DB.allowOverride=!DB.allowOverride; saveState(); push('PATCH','/settings',{allowOverride:DB.allowOverride}); toast('Override '+(DB.allowOverride?'enabled':'disabled'),'ok'); adminRules(); };
     }});
   }
 
@@ -909,10 +988,10 @@
       '<div class="card"><h3>Brevo attributes</h3><p class="hint">Create the contact fields Bizca maps to (name, company, source, country, interest, event, owner, consent…) in your Brevo account. Run once per account.</p><button class="btn soft" id="brevoSetup">Prepare Brevo attributes</button></div>' +
       '<div class="banner">'+ic.info+'<div>Leads route into the Brevo list set per event (Admin → Events). Excel on SharePoint is simulated until a Microsoft Graph / Azure AD app is configured with admin consent.</div></div>';
     shell('Destinations', 'Brevo + Excel', body, null, { back:'#/admin', bind(){
-      $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; saveState(); toast('Auto-send '+(DB.autoSend?'on':'off'),'ok'); adminDest(); };
-      $('#reqConsent').onclick = () => { DB.requireConsent=!DB.requireConsent; saveState(); toast('Consent '+(DB.requireConsent?'required':'optional'),'ok'); adminDest(); };
-      const ks = $('#brevoKeySave'); if (ks) ks.onclick = () => { const v=($('#brevoKey').value||'').trim(); if(!v){toast('Enter a key','err');return;} DB.brevoApiKey=v; brevoLists=null; saveState(); toast('Brevo key saved','ok'); adminDest(); };
-      const kc = $('#brevoKeyClear'); if (kc) kc.onclick = () => { DB.brevoApiKey=''; brevoLists=null; saveState(); toast('Using server default key','ok'); adminDest(); };
+      $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; saveState(); push('PATCH','/settings',{autoSend:DB.autoSend}); toast('Auto-send '+(DB.autoSend?'on':'off'),'ok'); adminDest(); };
+      $('#reqConsent').onclick = () => { DB.requireConsent=!DB.requireConsent; saveState(); push('PATCH','/settings',{requireConsent:DB.requireConsent}); toast('Consent '+(DB.requireConsent?'required':'optional'),'ok'); adminDest(); };
+      const ks = $('#brevoKeySave'); if (ks) ks.onclick = () => { const v=($('#brevoKey').value||'').trim(); if(!v){toast('Enter a key','err');return;} DB.brevoApiKey=v; brevoLists=null; saveState(); push('PATCH','/settings',{brevoApiKey:v}); toast('Brevo key saved','ok'); adminDest(); };
+      const kc = $('#brevoKeyClear'); if (kc) kc.onclick = () => { DB.brevoApiKey=''; brevoLists=null; saveState(); push('PATCH','/settings',{brevoApiKey:''}); toast('Brevo key removed','ok'); adminDest(); };
       const bs = $('#brevoSetup'); if (bs) bs.onclick = async () => {
         bs.disabled = true; bs.innerHTML = '<div class="spinner"></div> Preparing…';
         try {
@@ -963,13 +1042,13 @@
       list + '<button class="btn primary" id="newEv" style="margin-top:6px">'+ic.plus+' Create new event</button>';
     shell('Events', DB.events.length + ' event(s)', body, '#/admin', { back:'#/admin', bind(){
       if (hasKey && !lists) loadBrevoLists().then(r => { if (r && location.hash.indexOf('#/admin/events') === 0) adminEvents(); });
-      app.querySelectorAll('[data-evlist]').forEach(sel => sel.onchange = () => { const e=DB.events.find(x=>x.id===sel.getAttribute('data-evlist')); e.brevoListId = sel.value ? parseInt(sel.value,10) : null; saveState(); toast(e.brevoListId?('Leads will go to '+listName(e.brevoListId)):'List cleared','ok'); adminEvents(); });
+      app.querySelectorAll('[data-evlist]').forEach(sel => sel.onchange = () => { const e=DB.events.find(x=>x.id===sel.getAttribute('data-evlist')); e.brevoListId = sel.value ? parseInt(sel.value,10) : null; saveState(); push('PATCH','/events/'+e.id,{brevoListId:e.brevoListId}); toast(e.brevoListId?('Leads will go to '+listName(e.brevoListId)):'List cleared','ok'); adminEvents(); });
       app.querySelectorAll('[data-setactive]').forEach(b => b.onclick = () => { S.activeEventId = b.getAttribute('data-setactive'); saveState(); toast('Active event updated','ok'); adminEvents(); });
       app.querySelectorAll('[data-delev]').forEach(b => b.onclick = () => {
         const id = b.getAttribute('data-delev');
         const used = DB.leads.filter(l => l.eventId === id).length;
         modal('<h3>Delete event?</h3><p class="hint">'+(used ? used + ' lead(s) were captured at this event — they will be kept but lose the event reference.' : 'This event has no leads.')+'</p><button class="btn danger" id="delEvYes">Delete event</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">Cancel</button>');
-        setTimeout(()=>{ const y=document.getElementById('delEvYes'); if(y) y.onclick=()=>{ DB.events = DB.events.filter(x=>x.id!==id); if(S.activeEventId===id) S.activeEventId = DB.events.length?DB.events[0].id:null; saveState(); closeModal(); toast('Event deleted','ok'); adminEvents(); }; },0);
+        setTimeout(()=>{ const y=document.getElementById('delEvYes'); if(y) y.onclick=()=>{ DB.events = DB.events.filter(x=>x.id!==id); if(S.activeEventId===id) S.activeEventId = DB.events.length?DB.events[0].id:null; saveState(); push('DELETE','/events/'+id); closeModal(); toast('Event deleted','ok'); adminEvents(); }; },0);
       });
       $('#newEv').onclick = () => {
         modal('<h3>Create new event</h3><p class="hint">You can set presets and the Brevo list right after.</p>' +
@@ -980,8 +1059,9 @@
         setTimeout(()=>{ const a=document.getElementById('evAdd'); if(a) a.onclick=()=>{
           const nm=(document.getElementById('evn').value||'').trim();
           if(!nm){ toast('Enter an event name','err'); return; }
-          const ne={id:'e'+Date.now(),name:nm,startDate:document.getElementById('evStart').value||'',endDate:document.getElementById('evEnd').value||'',dates:'',status:'open',preset:{provenienza:'',country:'',interesse:''},brevoListId:null};
-          DB.events.push(ne); if(!S.activeEventId) S.activeEventId=ne.id; saveState(); closeModal(); toast('Event created','ok'); adminEvents();
+          push('POST','/events',{name:nm,startDate:document.getElementById('evStart').value||null,endDate:document.getElementById('evEnd').value||null})
+            .then(r=>{ const ne=Object.assign({preset:{provenienza:'',country:'',interesse:''}},r.event); DB.events.push(ne); if(!S.activeEventId) S.activeEventId=ne.id; saveState(); closeModal(); toast('Event created','ok'); adminEvents(); })
+            .catch(()=>{});
         }; },0);
       };
     }});
@@ -1024,8 +1104,29 @@
   window.render = render;
   window.addEventListener('hashchange', render);
 
-  loadState();
-  if (!DB.company.configured) { if (['#/setup','#/login'].indexOf(location.hash) === -1) location.hash = '#/welcome'; }
-  else if (S.user && (!location.hash || location.hash === '#/login' || location.hash === '#/' || location.hash === '#/setup' || location.hash === '#/welcome')) location.hash = '#/home';
-  render();
+  /* ---------- start ---------- */
+  (async function start() {
+    loadState();                       // offline cache first, so something shows instantly
+
+    // Coming back from the email confirmation link
+    if (/[?&]verified=1/.test(location.hash)) { toast('Email confirmed — you can sign in now', 'ok'); location.hash = '#/login'; }
+    else if (/[?&]verified=0/.test(location.hash)) { toast('That confirmation link is no longer valid', 'err'); location.hash = '#/login'; }
+
+    if (getToken()) {
+      try {
+        await pullState();             // server is the source of truth
+        if (!location.hash || ['#/login', '#/', '#/setup', '#/welcome'].indexOf(location.hash) >= 0) location.hash = '#/home';
+      } catch (e) {
+        if (e.status === 401) { setToken(''); S.user = null; location.hash = '#/login'; }
+        else if (!DB.company.configured) location.hash = '#/welcome';
+        // otherwise: stay on the cached workspace (offline)
+      }
+    } else {
+      S.user = null;
+      if (['#/setup', '#/login'].indexOf(location.hash) === -1) location.hash = DB.company.configured ? '#/login' : '#/welcome';
+    }
+    render();
+    // Refresh from the server when the connection comes back
+    window.addEventListener('online', () => { if (getToken()) pullState().then(() => render()).catch(() => {}); });
+  })();
 })();
