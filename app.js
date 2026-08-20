@@ -318,8 +318,8 @@
       if (!$('#privacyOk').checked) { toast('Please accept the privacy policy to continue', 'err'); return; }
       const btn = $('#doSetup'); btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Creating…';
       try {
-        await api('POST', '/auth/register', { company: name, domain, name: adName, email: adEmail, password: pwd, privacy: true });
-        checkEmailScreen(adEmail);
+        const r = await api('POST', '/auth/register', { company: name, domain, name: adName, email: adEmail, password: pwd, privacy: true });
+        checkEmailScreen(adEmail, r.emailSent === false ? (r.emailError || 'the confirmation email could not be sent') : null);
       } catch (e) {
         toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'Create workspace';
       }
@@ -327,13 +327,15 @@
   }
 
   /* ---------- "check your inbox" after registering ---------- */
-  function checkEmailScreen(email) {
+  function checkEmailScreen(email, mailProblem) {
     app.innerHTML =
       '<div class="login">' +
         '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>One last step</p></div>' +
         '<div class="card" style="box-shadow:var(--shadow-lg);text-align:center">' +
           '<h3>Check your inbox</h3>' +
-          '<p class="hint">We sent a confirmation link to <b>' + esc(email) + '</b>. Click it to activate your workspace, then sign in.</p>' +
+          (mailProblem
+            ? '<div class="banner" style="background:#FEF2F2;border-color:#FECACA;color:#991B1B;text-align:left">' + ic.alert + '<div>Your account was created, but we could not send the confirmation email: ' + esc(mailProblem) + '. Contact your Bizca administrator.</div></div>'
+            : '<p class="hint">We sent a confirmation link to <b>' + esc(email) + '</b>. Click it to activate your workspace, then sign in.</p>') +
           '<button class="btn primary" id="goLogin">Go to sign in</button>' +
           '<button class="btn ghost" id="resend" style="margin-top:10px">Resend email</button>' +
         '</div>' +
@@ -341,7 +343,7 @@
     $('#goLogin').onclick = () => go('#/login');
     $('#resend').onclick = async () => {
       const b = $('#resend'); b.disabled = true;
-      try { await api('POST', '/auth/resend', { email }); toast('Email sent again', 'ok'); }
+      try { const r = await api('POST', '/auth/resend', { email }); toast(r.emailSent === false ? ('Could not send: ' + (r.emailError || 'email not configured')) : 'Email sent again', r.emailSent === false ? 'err' : 'ok'); }
       catch (e) { toast(e.message, 'err'); }
       b.disabled = false;
     };

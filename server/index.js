@@ -71,7 +71,13 @@ async function sendEmail(to, subject, html) {
     headers: { 'api-key': BREVO_KEY, 'Content-Type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ sender: { email: SENDER_EMAIL, name: SENDER_NAME }, to: [{ email: to }], subject, htmlContent: html })
   });
-  if (!r.ok) { const t = await r.text().catch(() => ''); console.error('Brevo email failed', r.status, t); return { ok: false }; }
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    console.error('Brevo email failed', r.status, t);
+    let msg = 'Brevo rejected the email (' + r.status + ')';
+    try { const j = JSON.parse(t); if (j && j.message) msg = j.message; } catch (e) {}
+    return { ok: false, error: msg };
+  }
   return { ok: true };
 }
 
@@ -140,7 +146,7 @@ app.post('/auth/register', wrap(async (req, res) => {
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
 
   const link = (API_URL || '') + '/auth/verify?token=' + token;
-  await sendEmail(email, 'Confirm your Bizca account',
+  const mail = await sendEmail(email, 'Confirm your Bizca account',
     '<div style="font-family:Arial,sans-serif;font-size:15px;color:#0F172A">' +
     '<p>Hi ' + escapeHtml(name) + ',</p>' +
     '<p>Confirm your email address to activate the Bizca workspace for <b>' + escapeHtml(company) + '</b>.</p>' +
@@ -148,7 +154,7 @@ app.post('/auth/register', wrap(async (req, res) => {
     '<p style="color:#64748B;font-size:13px">Or paste this link in your browser:<br>' + link + '</p>' +
     '<p style="color:#64748B;font-size:13px">If you did not request this, you can ignore this email.</p></div>');
 
-  res.json({ ok: true, pendingVerification: true });
+  res.json({ ok: true, pendingVerification: true, emailSent: !!mail.ok, emailError: mail.ok ? null : (mail.error || 'Email not configured') });
 }));
 
 function escapeHtml(s) { return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -170,10 +176,10 @@ app.post('/auth/resend', wrap(async (req, res) => {
   const token = crypto.randomBytes(24).toString('hex');
   await pool.query('UPDATE users SET verify_token=$1, verify_sent_at=now() WHERE id=$2', [token, r.rows[0].id]);
   const link = (API_URL || '') + '/auth/verify?token=' + token;
-  await sendEmail(r.rows[0].email, 'Confirm your Bizca account',
+  const mail = await sendEmail(r.rows[0].email, 'Confirm your Bizca account',
     '<div style="font-family:Arial,sans-serif"><p>Confirm your email to activate your Bizca account.</p>' +
     '<p><a href="' + link + '">Confirm my email</a></p></div>');
-  res.json({ ok: true });
+  res.json({ ok: true, emailSent: !!mail.ok, emailError: mail.ok ? null : (mail.error || 'Email not configured') });
 }));
 
 app.post('/auth/login', wrap(async (req, res) => {
@@ -405,6 +411,11 @@ app.post('/sync-log', auth, wrap(async (req, res) => {
   const { leadId, dest, ok, msg } = req.body || {};
   await pool.query('INSERT INTO sync_log (company_id,lead_id,dest,ok,msg) VALUES ($1,$2,$3,$4,$5)', [req.session.cid, leadId || null, dest || '', !!ok, msg || '']);
   res.json({ ok: true });
+}));
+
+/* ---------- email self-test (safe: reveals no secrets) ---------- */
+app.get('/email-status', wrap(async (req, res) => {
+  res.json({ configured: !!BREVO_KEY, sender: SENDER_EMAIL, senderName: SENDER_NAME, appUrl: APP_URL, apiUrl: API_URL || null });
 }));
 
 /* ---------- health ---------- */
