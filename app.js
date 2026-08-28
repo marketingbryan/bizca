@@ -40,6 +40,7 @@
     DB.requireConsent = !!s.requireConsent;
     DB.allowOverride = s.allowOverride !== false;
     DB.brevoApiKey = s.brevoApiKey || '';
+    DB.ms = d.ms || { enabled: false };
     DB.fallbackOwner = s.fallbackOwner || (DB.users[0] && DB.users[0].id) || null;
     S.user = DB.users.find(u => u.id === d.me.id) || null;
     if (!S.activeEventId || !DB.events.some(e => e.id === S.activeEventId)) S.activeEventId = DB.events.length ? DB.events[0].id : null;
@@ -78,7 +79,7 @@
         leads: DB.leads, pickLists: DB.pickLists, events: DB.events,
         assignmentRules: DB.assignmentRules, users: DB.users, destinations: DB.destinations,
         fallbackOwner: DB.fallbackOwner, allowOverride: DB.allowOverride, autoSend: DB.autoSend,
-        requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey,
+        requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey, ms: DB.ms,
         syncLog: DB.syncLog.slice(0, 300),
         session: { activeEventId: S.activeEventId, userId: S.user ? S.user.id : null }
       };
@@ -103,7 +104,7 @@
       if (!raw) return;
       const d = JSON.parse(raw);
       ['company','leads','pickLists','events','assignmentRules','users','destinations','syncLog'].forEach(k => { if (d[k]) DB[k] = d[k]; });
-      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
+      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey','ms'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
       if (d.session) {
         if (d.session.activeEventId) S.activeEventId = d.session.activeEventId;
         // only trust a cached session if we still hold a token
@@ -120,7 +121,18 @@
   window.addEventListener('offline', () => { S.online = false; if (window.render) render(); });
   S.online = (navigator.onLine !== false);
 
-  /* ---------- delivery (Brevo real · Excel simulated) ---------- */
+  /* ---------- delivery (Brevo + Excel on SharePoint) ---------- */
+  // Excel is written server-side: the Microsoft client secret never reaches the browser.
+  async function pushToExcel(l) {
+    if (!(DB.ms && DB.ms.enabled)) return null;      // destination off → nothing to log
+    if (!getToken()) return { ok: false, msg: 'Not signed in' };
+    try {
+      const d = await api('POST', '/ms/append', { leadId: l.id });
+      if (d && d.skipped) return null;
+      return { ok: true, msg: 'Row added to ' + (d.file || 'the shared workbook') };
+    } catch (e) { return { ok: false, msg: e.message || 'Graph error' }; }
+  }
+
   async function pushToBrevo(l) {
     const ownerName = userName(l.ownerId);
     const ev = DB.events.find(e => e.id === l.eventId) || {};
@@ -143,11 +155,18 @@
   async function deliverLead(l) {
     const r = await pushToBrevo(l);
     DB.syncLog.unshift({ leadId: l.id, dest: 'Brevo', ok: r.ok, ts: Date.now(), msg: r.ok ? (r.action === 'updated' ? 'Contact updated (dedupe by email)' : 'Contact created') : r.msg });
-    DB.syncLog.unshift({ leadId: l.id, dest: 'Excel', ok: true, ts: Date.now(), msg: 'Row added (simulated — Graph not configured)' });
     if (r.ok) { l.status = 'Sent'; l.error = null; l.queuedOffline = false; }
     else { l.status = 'Error'; l.error = 'Brevo: ' + r.msg; }
     saveLead(l);
     api('POST', '/sync-log', { leadId: l.id, dest: 'Brevo', ok: r.ok, msg: r.ok ? (r.action || 'sent') : r.msg }).catch(() => {});
+
+    // Excel runs after the lead is saved, so the server has the row to copy.
+    // A failure here does not undo the Brevo push: it is logged and retryable.
+    const x = await pushToExcel(l);
+    if (x) {
+      DB.syncLog.unshift({ leadId: l.id, dest: 'Excel', ok: x.ok, ts: Date.now(), msg: x.msg });
+      if (!x.ok && r.ok) { l.error = 'Excel: ' + x.msg; saveLead(l); }
+    }
     return r.ok;
   }
   async function flushQueued() {
@@ -687,7 +706,7 @@
     const btn = $('#send'); if (btn){ btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Sending…'; }
     const ok = await deliverLead(l);
     saveState();
-    if (ok) toast('Sent to Brevo (+ Excel simulated)', 'ok');
+    if (ok) toast(DB.ms && DB.ms.enabled ? 'Sent to Brevo + Excel' : 'Sent to Brevo', 'ok');
     else toast('Brevo send failed — see details', 'err');
     go('#/leads');
   }
@@ -782,13 +801,14 @@
         '<div class="card"><h3>Leads by event</h3>' + byEvent.map(([n,c])=>'<div class="kv"><span class="k">'+esc(n)+'</span><span class="v">'+c+'</span></div>').join('') + '</div>' +
         '<div class="card"><h3>Leads by owner</h3>' + bySeller.map(([n,c])=>'<div class="kv"><span class="k">'+esc(n)+'</span><span class="v">'+c+'</span></div>').join('') + '</div>' +
         '<div class="card"><h3>Assignment</h3><div class="kv"><span class="k">Auto-assigned</span><span class="v">'+auto+'</span></div><div class="kv"><span class="k">Manual override</span><span class="v">'+manual+'</span></div></div>' +
-        '<div class="btnrow"><button class="btn ghost" id="csv">Export CSV</button><button class="btn ghost" id="xlsx">Open Excel</button></div>';
+        '<div class="btnrow"><button class="btn ghost" id="csv">Export CSV</button>' +
+        (DB.ms && DB.ms.fileUrl ? '<button class="btn ghost" id="xlsx">Open Excel</button>' : '') + '</div>';
     } else {
       body += '<div class="btnrow"><button class="btn ghost" id="csv">Export CSV</button></div>';
     }
     shell('Dashboard', admin?'Company overview':'My performance', body, '#/dashboard', { bind(){
-      const c=$('#csv'); if(c) c.onclick=()=>toast('CSV exported (mock)','ok');
-      const x=$('#xlsx'); if(x) x.onclick=()=>toast('Opening shared Excel… (mock)');
+      const c=$('#csv'); if(c) c.onclick=()=>exportCsv();
+      const x=$('#xlsx'); if(x) x.onclick=()=>window.open(DB.ms.fileUrl, '_blank', 'noopener');
     }});
   }
 
@@ -974,12 +994,179 @@
     }});
   }
 
+  // Same column order as the Excel table, so the two exports stay comparable.
+  function exportCsv() {
+    const head = ['Date','Event','First name','Last name','Company','Role','Email','Phone','Website','Address','Source','Country','Segment','Assigned to','Captured by','Status','Consent'];
+    const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const evName = id => (DB.events.find(e => e.id === id) || {}).name || '';
+    const rows = DB.leads.map(l => [
+      new Date(l.ts).toISOString().slice(0, 16).replace('T', ' '), evName(l.eventId),
+      l.first, l.last, l.company, l.role, l.email, l.phone, l.website, l.address,
+      l.provenienza, l.country, l.interesse, userName(l.ownerId), userName(l.createdBy),
+      l.status, l.consentAt ? new Date(l.consentAt).toISOString().slice(0, 10) : ''
+    ].map(q).join(','));
+    const csv = '﻿' + [head.map(q).join(',')].concat(rows).join('\r\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'bizca-leads-' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(DB.leads.length + ' lead(s) exported', 'ok');
+  }
+
+  /* ---------- Microsoft 365 · Excel on SharePoint ---------- */
+  let msShowOwn = false;   // reveal the "own app registration" fields
+  let msTables = null;     // table names found in the selected workbook
+  let msReport = null;     // last test result, shown under the buttons
+
+  function msCard(m) {
+    const hasOwn = !!(m.clientId && m.hasOwnSecret);
+    const showOwn = msShowOwn || hasOwn || !m.platformApp;
+    const tables = msTables || (m.tableName ? [m.tableName] : []);
+
+    const consent = (m.platformApp && !hasOwn)
+      ? '<p class="hint" style="margin:0 0 10px">Your IT admin approves Bizca once for your Microsoft tenant — no credentials to hand over.</p>' +
+        (m.tenantId ? '<div class="kv"><span class="k">Tenant authorised</span><span class="pill green">'+ic.check+' '+esc(String(m.tenantId).slice(0,8))+'…</span></div>' : '') +
+        '<div class="btnrow" style="margin-top:10px"><button class="btn soft sm" id="msConsent">'+(m.tenantId?'Re-run consent':'Grant admin consent')+'</button></div>'
+      : '';
+
+    const ownFields = showOwn
+      ? '<div class="field"><label>Directory (tenant) ID</label><input class="input" id="msTenant" value="'+esc(m.tenantId||'')+'" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off"></div>' +
+        '<div class="field"><label>Application (client) ID</label><input class="input" id="msClient" value="'+esc(m.clientId||'')+'" placeholder="only if your IT registered their own app" autocomplete="off"></div>' +
+        '<div class="field"><label>Client secret</label><input class="input" id="msSecret" type="password" placeholder="'+(m.hasOwnSecret?'•••••••••• saved':'paste once — kept on the server')+'" autocomplete="off"></div>' +
+        '<div class="btnrow"><button class="btn soft sm" id="msSaveApp">Save app details</button>' +
+          (hasOwn ? '<button class="btn ghost sm" id="msClearApp">Remove credentials</button>' : '') + '</div>'
+      : '<div class="btnrow" style="margin-top:4px"><button class="btn ghost sm" id="msOwn">Our IT registered their own app</button></div>';
+
+    const fileBlock =
+      '<div class="field"><label>Link to the Excel file</label><input class="input" id="msUrl" value="'+esc(m.fileUrl||'')+'" placeholder="https://contoso.sharepoint.com/…/Leads.xlsx" autocomplete="off"></div>' +
+      '<p class="hint" style="margin:-4px 0 10px">In Excel or SharePoint: Share → Copy link. The workbook must contain a named table (Insert → Table).</p>' +
+      '<div class="btnrow"><button class="btn soft sm" id="msResolve">Open file</button></div>' +
+      (m.fileName ? '<div class="kv" style="margin-top:10px"><span class="k">File</span><b style="font-size:13px">'+esc(m.fileName)+'</b></div>' : '') +
+      (tables.length
+        ? '<div class="field" style="margin-top:10px;margin-bottom:0"><label>Table to write into</label><select class="input" id="msTable">' +
+            tables.map(t => '<option value="'+esc(t)+'" '+(m.tableName===t?'selected':'')+'>'+esc(t)+'</option>').join('') +
+          '</select></div>'
+        : '');
+
+    const report = msReport
+      ? '<div class="banner" style="margin-top:10px">'+ (msReport.ok ? ic.check : ic.info) +'<div>'+msReport.html+'</div></div>'
+      : (m.lastError ? '<div class="banner" style="margin-top:10px">'+ic.info+'<div>Last error: '+esc(m.lastError)+'</div></div>' : '');
+
+    return '<div class="card"><h3>Microsoft 365 — Excel on SharePoint</h3>' +
+      '<p class="hint" style="margin:6px 0 14px">Every lead sent to Brevo is also appended as a row in your shared workbook. Columns are matched by header name, so you can reorder or add your own.</p>' +
+      '<h4 style="margin:0 0 8px;font-size:14px">1 · Authorise Bizca</h4>' + consent + ownFields +
+      '<h4 style="margin:18px 0 8px;font-size:14px">2 · Choose the file</h4>' + fileBlock +
+      '<h4 style="margin:18px 0 8px;font-size:14px">3 · Check and switch on</h4>' +
+      '<div class="btnrow"><button class="btn soft sm" id="msTest">Test connection</button><button class="btn ghost sm" id="msTestRow">Write a test row</button></div>' +
+      report +
+      '<div class="kv" style="margin-top:12px;border:none"><span class="k">Send leads to Excel</span><div class="switch '+(m.enabled?'on':'')+'" id="msOn"></div></div>' +
+      '</div>';
+  }
+
+  function bindMsCard() {
+    const busy = (el, label) => { el.disabled = true; el.innerHTML = '<div class="spinner"></div> ' + label; };
+
+    const consentFlag = /[?&]msconsent=1/.test(location.hash);
+    if (consentFlag) {
+      location.hash = '#/admin/dest';
+      toast('Microsoft tenant authorised', 'ok');
+      pullState().then(() => adminDest()).catch(() => {});
+      return;
+    }
+    if (/[?&]msconsent=0/.test(location.hash)) {
+      const why = (location.hash.match(/msreason=([^&]*)/) || [])[1];
+      location.hash = '#/admin/dest';
+      toast('Consent was not granted' + (why ? ': ' + decodeURIComponent(why) : ''), 'err');
+    }
+
+    const own = $('#msOwn'); if (own) own.onclick = () => { msShowOwn = true; adminDest(); };
+
+    const consent = $('#msConsent'); if (consent) consent.onclick = async () => {
+      busy(consent, 'Opening…');
+      try {
+        const d = await api('GET', '/ms/consent-url');
+        window.open(d.url, '_blank', 'noopener');
+        toast('Complete the approval in the Microsoft window, then come back', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      adminDest();
+    };
+
+    const saveApp = $('#msSaveApp'); if (saveApp) saveApp.onclick = async () => {
+      const body = { tenantId: ($('#msTenant').value || '').trim(), clientId: ($('#msClient').value || '').trim() };
+      const sec = ($('#msSecret').value || '').trim();
+      if (sec) body.clientSecret = sec;
+      if (!body.tenantId) { toast('Tenant ID is required', 'err'); return; }
+      busy(saveApp, 'Saving…');
+      try { const d = await api('PATCH', '/ms/config', body); DB.ms = d.ms; toast('Saved', 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+      adminDest();
+    };
+
+    const clearApp = $('#msClearApp'); if (clearApp) clearApp.onclick = async () => {
+      try { const d = await api('PATCH', '/ms/config', { clearSecret: true }); DB.ms = d.ms; msShowOwn = false; toast('Credentials removed', 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+      adminDest();
+    };
+
+    const resolve = $('#msResolve'); if (resolve) resolve.onclick = async () => {
+      const url = ($('#msUrl').value || '').trim();
+      if (!url) { toast('Paste the link to the Excel file', 'err'); return; }
+      busy(resolve, 'Opening…');
+      msReport = null;
+      try {
+        const d = await api('POST', '/ms/resolve', { url });
+        DB.ms = d.ms; msTables = d.tables || [];
+        toast(msTables.length ? d.file.name + ' — ' + msTables.length + ' table(s)' : 'Opened, but no named table found', msTables.length ? 'ok' : 'err');
+      } catch (e) { toast(e.message, 'err'); }
+      adminDest();
+    };
+
+    const table = $('#msTable'); if (table) table.onchange = async () => {
+      try { const d = await api('PATCH', '/ms/config', { tableName: table.value }); DB.ms = d.ms; toast('Table set', 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+    };
+
+    const runTest = async (btn, writeTest) => {
+      busy(btn, writeTest ? 'Writing…' : 'Checking…');
+      try {
+        const d = await api('POST', '/ms/test', { writeTest: !!writeTest });
+        DB.ms = d.ms; msTables = d.tables || msTables;
+        const mapped = (d.mapped || []).length, unknown = (d.unknown || []);
+        msReport = { ok: true, html:
+          '<b>Connection works.</b> ' + esc(String(d.file || 'workbook')) + ' · table "' + esc(DB.ms.tableName || '') + '"<br>' +
+          mapped + ' of ' + (d.headers || []).length + ' columns matched' +
+          (unknown.length ? ' · not recognised, left blank: ' + esc(unknown.join(', ')) : '') +
+          (d.wroteTestRow ? '<br>A test row was added — delete it when you are done.' : '') };
+        toast(writeTest ? 'Test row written' : 'Connection OK', 'ok');
+      } catch (e) { msReport = { ok: false, html: esc(e.message) }; toast(e.message, 'err'); }
+      adminDest();
+    };
+    const t1 = $('#msTest'); if (t1) t1.onclick = () => runTest(t1, false);
+    const t2 = $('#msTestRow'); if (t2) t2.onclick = () => runTest(t2, true);
+
+    const sw = $('#msOn'); if (sw) sw.onclick = async () => {
+      const next = !(DB.ms && DB.ms.enabled);
+      if (next && !(DB.ms && DB.ms.ready)) { toast('Finish steps 1 and 2 first', 'err'); return; }
+      try { const d = await api('PATCH', '/ms/config', { enabled: next }); DB.ms = d.ms; toast('Excel destination ' + (next ? 'on' : 'off'), 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+      adminDest();
+    };
+  }
+
   function adminDest() {
+    const m = DB.ms || {};
+    const msLive = m.enabled && m.ready;
     const badge = d => d.type === 'brevo'
       ? '<span class="pill green">' + ic.check + ' live</span>'
-      : '<span class="pill amber">simulated</span>';
+      : (msLive ? '<span class="pill green">' + ic.check + ' live</span>'
+                : (m.ready ? '<span class="pill amber">ready — not enabled</span>' : '<span class="pill gray">not configured</span>'));
+    const detail = d => d.type === 'excel'
+      ? (m.fileName ? 'Writing to ' + m.fileName + (m.tableName ? ' · table "' + m.tableName + '"' : '') : d.detail)
+      : d.detail;
     const keyMask = DB.brevoApiKey ? '•••• ' + DB.brevoApiKey.slice(-4) : 'not set — using server default';
-    const body = DB.destinations.map(d => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(d.label)+'</h3>'+badge(d)+'</div><p class="hint" style="margin:6px 0 0">'+esc(d.detail)+'</p></div>').join('') +
+    const body = DB.destinations.map(d => '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h3>'+esc(d.label)+'</h3>'+badge(d)+'</div><p class="hint" style="margin:6px 0 0">'+esc(detail(d))+'</p></div>').join('') +
+      msCard(m) +
       '<div class="card"><h3>Brevo account (API key)</h3><p class="hint">The admin sets the Brevo API key here. Change it to point Bizca at a different Brevo account. Current: <b>'+esc(keyMask)+'</b></p>' +
         '<div class="field" style="margin-bottom:10px"><label>Brevo API key</label><input class="input" id="brevoKey" type="password" placeholder="xkeysib-…" autocomplete="off"></div>' +
         '<div class="btnrow"><button class="btn soft sm" id="brevoKeySave">Save key</button>' + (DB.brevoApiKey ? '<button class="btn ghost sm" id="brevoKeyClear">Use server default</button>' : '') + '</div>' +
@@ -988,8 +1175,9 @@
         '<div class="kv"><span class="k">Auto-send when lead is Ready</span><div class="switch '+(DB.autoSend?'on':'')+'" id="auto"></div></div>' +
         '<div class="kv" style="border:none"><span class="k">Require consent signature before sending</span><div class="switch '+(DB.requireConsent?'on':'')+'" id="reqConsent"></div></div></div>' +
       '<div class="card"><h3>Brevo attributes</h3><p class="hint">Create the contact fields Bizca maps to (name, company, source, country, interest, event, owner, consent…) in your Brevo account. Run once per account.</p><button class="btn soft" id="brevoSetup">Prepare Brevo attributes</button></div>' +
-      '<div class="banner">'+ic.info+'<div>Leads route into the Brevo list set per event (Admin → Events). Excel on SharePoint is simulated until a Microsoft Graph / Azure AD app is configured with admin consent.</div></div>';
+      '<div class="banner">'+ic.info+'<div>Leads route into the Brevo list set per event (Admin → Events), and are appended to the shared Excel table when the Microsoft destination is on.</div></div>';
     shell('Destinations', 'Brevo + Excel', body, null, { back:'#/admin', bind(){
+      bindMsCard();
       $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; saveState(); push('PATCH','/settings',{autoSend:DB.autoSend}); toast('Auto-send '+(DB.autoSend?'on':'off'),'ok'); adminDest(); };
       $('#reqConsent').onclick = () => { DB.requireConsent=!DB.requireConsent; saveState(); push('PATCH','/settings',{requireConsent:DB.requireConsent}); toast('Consent '+(DB.requireConsent?'required':'optional'),'ok'); adminDest(); };
       const ks = $('#brevoKeySave'); if (ks) ks.onclick = () => { const v=($('#brevoKey').value||'').trim(); if(!v){toast('Enter a key','err');return;} DB.brevoApiKey=v; brevoLists=null; saveState(); push('PATCH','/settings',{brevoApiKey:v}); toast('Brevo key saved','ok'); adminDest(); };

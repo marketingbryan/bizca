@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
+const ms = require('./ms');
 
 const PORT = process.env.PORT || 3000;
 const APP_URL = (process.env.APP_URL || 'https://bizca.vercel.app').replace(/\/$/, '');
@@ -246,6 +247,8 @@ app.get('/state', auth, wrap(async (req, res) => {
   res.json({
     company: { id: c.id, name: c.name, domain: c.domain, locale: c.locale, configured: true },
     settings: { autoSend: s.autoSend !== false, requireConsent: !!s.requireConsent, allowOverride: s.allowOverride !== false, brevoApiKey: s.brevoApiKey || '', fallbackOwner: s.fallbackOwner || null },
+    // Microsoft/Excel config is admin-only, and never carries the client secret
+    ms: req.session.role === 'admin' ? ms.publicCfg(s) : { enabled: !!(s.ms && s.ms.enabled) },
     users: users.rows.map(outUser),
     events: events.rows.map(outEvent),
     picklists: {
@@ -412,6 +415,9 @@ app.post('/sync-log', auth, wrap(async (req, res) => {
   await pool.query('INSERT INTO sync_log (company_id,lead_id,dest,ok,msg) VALUES ($1,$2,$3,$4,$5)', [req.session.cid, leadId || null, dest || '', !!ok, msg || '']);
   res.json({ ok: true });
 }));
+
+/* ---------- Microsoft 365 / Excel on SharePoint ---------- */
+ms.mount(app, { pool, auth, requireAdmin, wrap, sign, verifyToken, APP_URL, API_URL });
 
 /* ---------- email self-test (safe: reveals no secrets) ---------- */
 app.get('/email-status', wrap(async (req, res) => {

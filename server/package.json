@@ -4,8 +4,13 @@
   "private": true,
   "description": "Bizca shared backend — multi-tenant API on Railway (Postgres)",
   "main": "index.js",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node index.js" },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node ms.test.js"
+  },
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",

@@ -27,11 +27,12 @@ window.DB = {
 
   destinations: [
     { id: 'd_brevo', type: 'brevo', label: 'Brevo (CRM)', status: 'connected', detail: 'Create/update contact, dedupe by email, BIZCA_* attributes, list per event' },
-    { id: 'd_excel', type: 'excel', label: 'Excel — SharePoint', status: 'simulated', detail: 'Simulated — needs Microsoft Graph / Azure AD app with admin consent' }
+    { id: 'd_excel', type: 'excel', label: 'Excel — SharePoint', status: 'off', detail: 'Append a row to a named table in your shared workbook, via Microsoft Graph' }
   ],
   autoSend: true,
   requireConsent: false,   // when true, an on-screen signature is required before sending
   brevoApiKey: '',         // set by the admin in-app; overrides the server default when present
+  ms: { enabled: false },  // Microsoft/Excel config (public view — the secret stays on the server)
 
   // Leads captured in the app (empty on a fresh install)
   leads: [],
