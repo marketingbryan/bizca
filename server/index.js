@@ -19,6 +19,10 @@ const SENDER_NAME = process.env.BREVO_SENDER_NAME || 'Bizca';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 // Public URL of this API (Railway domain) — used to build email confirmation links
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
+// Bump on every deploy that changes the API surface: /health reports it, so we can
+// tell from outside which revision Railway is actually running.
+const BUILD = '2026-09-07-ms1';
+const ROUTES = ['auth', 'state', 'leads', 'ms'];
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -427,7 +431,8 @@ app.get('/email-status', wrap(async (req, res) => {
 /* ---------- health ---------- */
 app.get('/health', wrap(async (req, res) => {
   await pool.query('SELECT 1');
-  res.json({ ok: true, service: 'bizca-api', time: new Date().toISOString() });
+  // `build` tells us at a glance which revision is actually running.
+  res.json({ ok: true, service: 'bizca-api', build: BUILD, routes: ROUTES, time: new Date().toISOString() });
 }));
 
 migrate()
