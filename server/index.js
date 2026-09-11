@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 const ms = require('./ms');
+const emails = require('./emails');
 
 const PORT = process.env.PORT || 3000;
 const APP_URL = (process.env.APP_URL || 'https://bizca.vercel.app').replace(/\/$/, '');
@@ -21,8 +22,8 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-07-ms1';
-const ROUTES = ['auth', 'state', 'leads', 'ms'];
+const BUILD = '2026-09-11-i18n1';
+const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n'];
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -125,7 +126,8 @@ const outRule = r => ({ id: r.id, priority: r.priority, countries: r.countries |
 
 // Register a company + its first admin. The admin must confirm by email.
 app.post('/auth/register', wrap(async (req, res) => {
-  const { company, domain, name, email, password, privacy } = req.body || {};
+  const { company, domain, name, email, password, privacy, locale } = req.body || {};
+  const lang = emails.pick(locale);
   if (!company || !domain || !name || !isEmail(email) || !password) return res.status(400).json({ error: 'Missing or invalid fields' });
   if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
   if (!privacy) return res.status(400).json({ error: 'Privacy policy must be accepted' });
@@ -140,24 +142,19 @@ app.post('/auth/register', wrap(async (req, res) => {
   try {
     await client.query('BEGIN');
     await client.query(
-      'INSERT INTO companies (id,name,domain,settings,privacy_at) VALUES ($1,$2,$3,$4,now())',
-      [cid, company, String(domain).toLowerCase().replace(/^@/, ''), { autoSend: true, requireConsent: false, allowOverride: true, brevoApiKey: '', fallbackOwner: uid }]
+      'INSERT INTO companies (id,name,domain,locale,settings,privacy_at) VALUES ($1,$2,$3,$4,$5,now())',
+      [cid, company, String(domain).toLowerCase().replace(/^@/, ''), lang, { autoSend: true, requireConsent: false, allowOverride: true, brevoApiKey: '', fallbackOwner: uid }]
     );
     await client.query(
-      'INSERT INTO users (id,company_id,name,email,password_hash,role,status,email_verified,verify_token,verify_sent_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())',
-      [uid, cid, name, String(email).toLowerCase(), hashPassword(password), 'admin', 'active', false, token]
+      'INSERT INTO users (id,company_id,name,email,password_hash,role,status,email_verified,verify_token,verify_sent_at,locale) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10)',
+      [uid, cid, name, String(email).toLowerCase(), hashPassword(password), 'admin', 'active', false, token, lang]
     );
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
 
   const link = (API_URL || '') + '/auth/verify?token=' + token;
-  const mail = await sendEmail(email, 'Confirm your Bizca account',
-    '<div style="font-family:Arial,sans-serif;font-size:15px;color:#0F172A">' +
-    '<p>Hi ' + escapeHtml(name) + ',</p>' +
-    '<p>Confirm your email address to activate the Bizca workspace for <b>' + escapeHtml(company) + '</b>.</p>' +
-    '<p><a href="' + link + '" style="display:inline-block;padding:12px 22px;background:#0284C7;color:#fff;border-radius:10px;text-decoration:none;font-weight:600">Confirm my email</a></p>' +
-    '<p style="color:#64748B;font-size:13px">Or paste this link in your browser:<br>' + link + '</p>' +
-    '<p style="color:#64748B;font-size:13px">If you did not request this, you can ignore this email.</p></div>');
+  const msg = emails.build('confirm', lang, { name, company, link });
+  const mail = await sendEmail(email, msg.subject, msg.html);
 
   res.json({ ok: true, pendingVerification: true, emailSent: !!mail.ok, emailError: mail.ok ? null : (mail.error || 'Email not configured') });
 }));
@@ -175,15 +172,14 @@ app.get('/auth/verify', wrap(async (req, res) => {
 
 // Resend the confirmation email
 app.post('/auth/resend', wrap(async (req, res) => {
-  const { email } = req.body || {};
-  const r = await pool.query('SELECT id,name,email,email_verified FROM users WHERE lower(email)=lower($1)', [email || '']);
+  const { email, locale } = req.body || {};
+  const r = await pool.query('SELECT id,name,email,email_verified,locale FROM users WHERE lower(email)=lower($1)', [email || '']);
   if (!r.rowCount || r.rows[0].email_verified) return res.json({ ok: true }); // do not reveal account state
   const token = crypto.randomBytes(24).toString('hex');
   await pool.query('UPDATE users SET verify_token=$1, verify_sent_at=now() WHERE id=$2', [token, r.rows[0].id]);
   const link = (API_URL || '') + '/auth/verify?token=' + token;
-  const mail = await sendEmail(r.rows[0].email, 'Confirm your Bizca account',
-    '<div style="font-family:Arial,sans-serif"><p>Confirm your email to activate your Bizca account.</p>' +
-    '<p><a href="' + link + '">Confirm my email</a></p></div>');
+  const msg = emails.build('resend', locale || r.rows[0].locale, { link });
+  const mail = await sendEmail(r.rows[0].email, msg.subject, msg.html);
   res.json({ ok: true, emailSent: !!mail.ok, emailError: mail.ok ? null : (mail.error || 'Email not configured') });
 }));
 
@@ -249,7 +245,7 @@ app.get('/state', auth, wrap(async (req, res) => {
   const c = co.rows[0];
   const s = c.settings || {};
   res.json({
-    company: { id: c.id, name: c.name, domain: c.domain, locale: c.locale, configured: true },
+    company: { id: c.id, name: c.name, domain: c.domain, locale: c.locale || 'en', configured: true },
     settings: { autoSend: s.autoSend !== false, requireConsent: !!s.requireConsent, allowOverride: s.allowOverride !== false, brevoApiKey: s.brevoApiKey || '', fallbackOwner: s.fallbackOwner || null },
     // Microsoft/Excel config is admin-only, and never carries the client secret
     ms: req.session.role === 'admin' ? ms.publicCfg(s) : { enabled: !!(s.ms && s.ms.enabled) },
@@ -262,35 +258,47 @@ app.get('/state', auth, wrap(async (req, res) => {
     rules: rules.rows.map(outRule),
     leads: leads.rows.map(outLead),
     syncLog: logs.rows.map(l => ({ leadId: l.lead_id, dest: l.dest, ok: l.ok, msg: l.msg, ts: new Date(l.ts).getTime() })),
-    me: { id: req.session.uid, role: req.session.role }
+    me: { id: req.session.uid, role: req.session.role, locale: (users.rows.find(u => u.id === req.session.uid) || {}).locale || null }
   });
 }));
 
 /* ---------- settings ---------- */
 app.patch('/settings', auth, requireAdmin, wrap(async (req, res) => {
+  const body = Object.assign({}, req.body || {});
+  const locale = body.locale; delete body.locale;
   const cur = await pool.query('SELECT settings FROM companies WHERE id=$1', [req.session.cid]);
-  const merged = Object.assign({}, cur.rows[0].settings || {}, req.body || {});
+  const merged = Object.assign({}, cur.rows[0].settings || {}, body);
   await pool.query('UPDATE companies SET settings=$1 WHERE id=$2', [merged, req.session.cid]);
+  if (typeof locale === 'string') {
+    await pool.query('UPDATE companies SET locale=$1 WHERE id=$2', [emails.pick(locale), req.session.cid]);
+  }
   res.json({ ok: true, settings: merged });
+}));
+
+/* The signed-in user's own preferences. locale:null clears the personal choice
+   and falls back to the workspace default. */
+app.patch('/me', auth, wrap(async (req, res) => {
+  const l = (req.body || {}).locale;
+  const value = (l === null || l === '') ? null : emails.pick(l);
+  await pool.query('UPDATE users SET locale=$1 WHERE id=$2', [value, req.session.uid]);
+  res.json({ ok: true, locale: value });
 }));
 
 /* ---------- users ---------- */
 app.post('/users', auth, requireAdmin, wrap(async (req, res) => {
-  const { name, email, role } = req.body || {};
+  const { name, email, role, locale } = req.body || {};
   if (!isEmail(email)) return res.status(400).json({ error: 'Invalid email' });
   const dup = await pool.query('SELECT 1 FROM users WHERE lower(email)=lower($1)', [email]);
   if (dup.rowCount) return res.status(409).json({ error: 'That user already exists' });
   const uid = id('u_');
   const token = crypto.randomBytes(24).toString('hex');
-  await pool.query('INSERT INTO users (id,company_id,name,email,role,status,email_verified,verify_token,verify_sent_at) VALUES ($1,$2,$3,$4,$5,$6,false,$7,now())',
-    [uid, req.session.cid, name || String(email).split('@')[0], String(email).toLowerCase(), role === 'admin' ? 'admin' : 'seller', 'active', token]);
-  const co = await pool.query('SELECT name FROM companies WHERE id=$1', [req.session.cid]);
+  const co = await pool.query('SELECT name,locale FROM companies WHERE id=$1', [req.session.cid]);
+  const lang = emails.pick(locale || co.rows[0].locale);
+  await pool.query('INSERT INTO users (id,company_id,name,email,role,status,email_verified,verify_token,verify_sent_at,locale) VALUES ($1,$2,$3,$4,$5,$6,false,$7,now(),$8)',
+    [uid, req.session.cid, name || String(email).split('@')[0], String(email).toLowerCase(), role === 'admin' ? 'admin' : 'seller', 'active', token, lang]);
   const link = APP_URL + '/#/activate?email=' + encodeURIComponent(email) + '&token=' + token;
-  await sendEmail(email, 'You have been invited to Bizca',
-    '<div style="font-family:Arial,sans-serif;font-size:15px;color:#0F172A">' +
-    '<p>You have been added to the Bizca workspace of <b>' + escapeHtml(co.rows[0].name) + '</b>.</p>' +
-    '<p>Set your password to get started — or simply sign in with Google using this address.</p>' +
-    '<p><a href="' + link + '" style="display:inline-block;padding:12px 22px;background:#0284C7;color:#fff;border-radius:10px;text-decoration:none;font-weight:600">Activate my account</a></p></div>');
+  const msg = emails.build('invite', lang, { company: co.rows[0].name, link });
+  await sendEmail(email, msg.subject, msg.html);
   const r = await pool.query('SELECT * FROM users WHERE id=$1', [uid]);
   res.json({ ok: true, user: outUser(r.rows[0]) });
 }));

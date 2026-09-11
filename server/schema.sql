@@ -22,8 +22,11 @@ CREATE TABLE IF NOT EXISTS users (
   email_verified BOOLEAN NOT NULL DEFAULT false,
   verify_token   TEXT,
   verify_sent_at TIMESTAMPTZ,
+  locale         TEXT,   -- personal choice; NULL means "follow the workspace"
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Added after the first release: keep existing deployments migrating cleanly.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locale TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users (lower(email));
 CREATE INDEX IF NOT EXISTS users_company_idx ON users (company_id);
 

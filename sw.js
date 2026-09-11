@@ -1,9 +1,10 @@
 /* Bizca service worker — offline-tolerant shell cache */
-const CACHE = 'bizca-v6';
+const CACHE = 'bizca-v7';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
+  './i18n.js',
   './data.js',
   './app.js',
   './manifest.webmanifest',
