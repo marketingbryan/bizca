@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node ms.test.js"
+    "test": "node ms.test.js && node invite.test.js && node msauth.test.js && node security.test.js"
   },
   "dependencies": {
     "express": "^4.19.2",

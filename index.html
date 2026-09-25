@@ -46,7 +46,10 @@
         }).catch(() => {});
         let reloading = false;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (reloading) return; reloading = true; location.reload();
+          if (reloading) return; reloading = true;
+          // Never reload in the middle of a send: wait until it has finished.
+          const go = () => (window.__bizcaBusy ? setTimeout(go, 500) : location.reload());
+          go();
         });
       });
     }

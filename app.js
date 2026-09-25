@@ -4,7 +4,7 @@
   const DB = window.DB, S = window.SESSION;
   const app = document.getElementById('app');
   const modalRoot = document.getElementById('modal-root');
-  let scanIndex = 0, batchMode = false;
+  let batchMode = false;
 
   /* ---------- backend ---------- */
   const API = 'https://bizca-production.up.railway.app';
@@ -34,7 +34,13 @@
     DB.events = (d.events || []).map(e => Object.assign({}, e, { preset: e.preset || { provenienza: '', country: '', interesse: '' } }));
     DB.pickLists = d.picklists || { provenienza: [], interesse: [] };
     DB.assignmentRules = d.rules || [];
-    DB.leads = d.leads || [];
+    // Merge, don't replace: a lead saved only on this device (captured offline,
+    // edited without signal, or queued for sending) must survive a refresh.
+    const serverLeads = d.leads || [];
+    const localOnly = (DB.leads || []).filter(l => l._dirty || l.queuedOffline);
+    const keep = new Map(localOnly.map(l => [l.id, l]));
+    DB.leads = serverLeads.map(l => keep.get(l.id) || l)
+      .concat(localOnly.filter(l => !serverLeads.some(x => x.id === l.id)));
     DB.syncLog = d.syncLog || [];
     const s = d.settings || {};
     DB.autoSend = s.autoSend !== false;
@@ -44,7 +50,7 @@
     DB.newsletterListId = s.newsletterListId || null;
     DB.ms = d.ms || { enabled: false };
     DB.fallbackOwner = s.fallbackOwner || (DB.users[0] && DB.users[0].id) || null;
-    S.user = DB.users.find(u => u.id === d.me.id) || null;
+    S.user = (d.me && DB.users.find(u => u.id === d.me.id)) || null;
     applyLang();
     if (!S.activeEventId || !DB.events.some(e => e.id === S.activeEventId)) S.activeEventId = DB.events.length ? DB.events[0].id : null;
     saveState();
@@ -55,11 +61,22 @@
   function push(method, path, body) {
     return api(method, path, body).catch(e => { if (e.status !== 401) toast(e.message, 'err'); throw e; });
   }
-  // Persist one lead (create or update). Silent on failure: the local copy is kept
-  // and will be retried on the next save.
+  /* Persist one lead. Until the server confirms, the lead is marked _dirty: a
+     refresh from the server keeps the local copy instead of overwriting it, and
+     unsaved leads are pushed again on the next sync. Resolves to true when saved. */
   function saveLead(l) {
-    if (!getToken()) return Promise.resolve();
-    return api('PUT', '/leads/' + l.id, l).catch(() => {});
+    l._dirty = true;
+    saveState();
+    if (!getToken()) return Promise.resolve(false);
+    const payload = Object.assign({}, l); delete payload._dirty;
+    return api('PUT', '/leads/' + l.id, payload)
+      .then(() => { l._dirty = false; saveState(); return true; })
+      .catch(() => false);
+  }
+  async function flushDirty() {
+    const dirty = DB.leads.filter(l => l._dirty);
+    for (const l of dirty) { if (!(await saveLead(l))) break; }
+    return dirty.length;
   }
 
   /* If i18n.js failed to load, fall back to the English source strings rather
@@ -74,6 +91,12 @@
   }
 
   /* ---------- helpers ---------- */
+  // Lead ids must not be guessable: a timestamp alone lets anyone predict them.
+  function newLeadId() {
+    const r = new Uint8Array(8);
+    (window.crypto || window.msCrypto).getRandomValues(r);
+    return 'l' + Date.now().toString(36) + Array.from(r, b => b.toString(16).padStart(2, '0')).join('');
+  }
   const t = (k, v) => I18N.t(k, v);        // translate
   const tp = (k, n, v) => I18N.tp(k, n, v); // translate with a count
   const tc = c => I18N.country(c);          // country label (stored value stays English)
@@ -178,7 +201,7 @@
   /* ---------- connectivity & install ---------- */
   let deferredPrompt = null;
   window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredPrompt = e; if (window.render) render(); });
-  window.addEventListener('online', () => { S.online = true; if (window.render) render(); flushQueued(); });
+  window.addEventListener('online', () => { S.online = true; if (window.render) render(); });
   window.addEventListener('offline', () => { S.online = false; if (window.render) render(); });
   S.online = (navigator.onLine !== false);
 
@@ -216,23 +239,27 @@
         } })
       });
       const data = await res.json().catch(() => ({}));
-      if (res.ok && data.ok) return { ok: true, action: data.action };
+      if (res.ok && data.ok) return { ok: true, action: data.action, note: data.note || null };
       return { ok: false, msg: data.error || ('Brevo error ' + res.status) };
     } catch (e) { return { ok: false, msg: e.message }; }
   }
   async function deliverLead(l) {
     const r = await pushToBrevo(l);
-    DB.syncLog.unshift({ leadId: l.id, dest: 'Brevo', ok: r.ok, ts: Date.now(), msg: r.ok ? (r.action === 'updated' ? 'Contact updated (dedupe by email)' : 'Contact created') : r.msg });
+    DB.syncLog.unshift({ leadId: l.id, dest: 'Brevo', ok: r.ok, ts: Date.now(),
+      msg: r.ok ? ((r.action === 'updated' ? 'Contact updated (dedupe by email)' : 'Contact created') + (r.note ? ' — ' + r.note : '')) : r.msg });
     if (r.ok) { l.status = 'Sent'; l.error = null; l.queuedOffline = false; }
     else { l.status = 'Error'; l.error = 'Brevo: ' + r.msg; }
     // The server builds the Excel row from the database copy of the lead, so the
     // save must have landed first — otherwise it reads a stale lead or none at all.
-    await saveLead(l);
+    const saved = await saveLead(l);
     api('POST', '/sync-log', { leadId: l.id, dest: 'Brevo', ok: r.ok, msg: r.ok ? (r.action || 'sent') : r.msg }).catch(() => {});
 
     // Excel runs after the lead is saved, so the server has the row to copy.
     // A failure here does not undo the Brevo push: it is logged and retryable.
-    const x = await pushToExcel(l);
+    // Only a lead that is really sent AND saved goes to the file. Otherwise it is
+    // marked and the row is written later by the backlog.
+    const x = (r.ok && saved) ? await pushToExcel(l)
+            : (r.ok && DB.ms && DB.ms.ready && DB.ms.enabled ? { ok: false, msg: 'Lead not saved yet — the row will follow' } : null);
     if (x) {
       DB.syncLog.unshift({ leadId: l.id, dest: 'Excel', ok: x.ok, ts: Date.now(), msg: x.msg });
       // Already in Brevo but not yet in the file: marked and retried later.
@@ -243,29 +270,45 @@
     }
     return r.ok;
   }
+  /* Everything that is waiting to reach the server, in the right order:
+     1) unsaved leads, 2) leads queued for sending, 3) Excel rows still owed.
+     One run at a time: a second trigger while it works is ignored. */
+  const sending = new Set();          // lead ids being sent right now
+  const saveTimers = new Map();       // lead id → pending autosave while typing
+  let flushing = false;
   async function flushQueued() {
-    const q = DB.leads.filter(l => l.queuedOffline && (l.status === 'Ready' || l.status === 'Error'));
-    for (const l of q) { await deliverLead(l); }
-    const n = await flushExcelBacklog();
-    if (!q.length && !n) return;
-    saveState();
-    if (q.length) toast(tp('n_leads_synced', q.length), 'ok');
-    else toast(tp('n_rows_written', n), 'ok');
-    if (window.render) render();
+    if (flushing || !getToken()) return;
+    flushing = true;
+    try {
+      await flushDirty();
+      const q = DB.leads.filter(l => l.queuedOffline && (l.status === 'Ready' || l.status === 'Error'));
+      for (const l of q) {
+        if (sending.has(l.id)) continue;
+        sending.add(l.id);
+        try { await deliverLead(l); } finally { sending.delete(l.id); }
+      }
+      const n = await flushExcelBacklog();
+      if (!q.length && !n) return;
+      saveState();
+      if (q.length) toast(tp('n_leads_synced', q.length), 'ok');
+      else toast(tp('n_rows_written', n), 'ok');
+      if (window.render) render();
+    } finally { flushing = false; }
   }
-
-  // Sent leads whose row did not reach the shared file, retried quietly.
   async function flushExcelBacklog() {
     if (!(DB.ms && DB.ms.enabled) || !getToken()) return 0;
     let done = 0;
-    for (const l of DB.leads.filter(l => l.excelPending && l.status === 'Sent')) {
+    for (const l of DB.leads.filter(l => l.excelPending && l.status === 'Sent' && !l._dirty)) {
       const x = await pushToExcel(l);
       if (x && x.ok) { l.excelPending = false; if (l.error && /^Excel:/.test(l.error)) l.error = null; done++; saveLead(l); }
-      else break;                        // off, unreachable or failing: stop, try again later
+      else if (x && x.off) break;        // switched off: nothing will succeed now
+      // any other failure: skip this one and carry on — one bad row must not
+      // block every row behind it
     }
     if (done) saveState();
     return done;
   }
+
 
   // Brevo lists (for per-event routing config in Admin)
   let brevoLists = null;
@@ -328,7 +371,9 @@
   };
   const STATUS_IT = { 'Captured':'Acquisito', 'To finalize':'Da completare', 'Ready':'Pronto', 'Sent':'Inviato', 'Error':'Errore' };
   const statusLabel = s => (I18N.lang === 'it' ? (STATUS_IT[s] || s) : (STATUS[s] ? STATUS[s].label : s));
-  const statusPill = s => '<span class="pill ' + STATUS[s].pill + '">' + esc(statusLabel(s)) + '</span>';
+  const statusPill = s => '<span class="pill ' + ((STATUS[s] && STATUS[s].pill) || 'gray') + '">' + esc(statusLabel(s)) + '</span>';
+  // Only our own photos and signatures are ever put in an <img>: a data URL of an image.
+  const imgSrc = v => (typeof v === 'string' && /^data:image\/(png|jpe?g|webp);base64,/.test(v)) ? esc(v) : '';
   const requiredFilled = l => l.provenienza && l.country && l.interesse && (l.first || l.last);
 
   /* The lead belongs to whoever captured it. No routing rules: the person who
@@ -555,7 +600,6 @@
   }
 
   /* ---------- Login ---------- */
-  let googleReady = false;
   function loginScreen() {
     app.innerHTML =
       '<div class="login">' +
@@ -632,7 +676,6 @@
       if (!window.google || !google.accounts || !google.accounts.id) return;
       google.accounts.id.initialize({ client_id: clientId, callback: onGoogleCredential });
       google.accounts.id.renderButton(host, { theme: 'outline', size: 'large', width: 320, text: 'signin_with' });
-      googleReady = true;
     };
     if (window.google && window.google.accounts) { start(); return; }
     const s = document.createElement('script');
@@ -688,7 +731,15 @@
             '<button class="btn danger" id="doLogout" style="margin-top:14px">'+esc(t('Sign out'))+'</button>' +
             '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">'+esc(t('Close'))+'</button>');
           bindLangSwitch(() => { closeModal(); render(); });
-          setTimeout(()=>{ const b=document.getElementById('doLogout'); if(b) b.onclick=()=>{ setToken(''); S.user=null; DB.leads=[]; saveState(); closeModal(); go('#/login'); }; },0);
+          setTimeout(()=>{ const b=document.getElementById('doLogout'); if(b) b.onclick=async ()=>{
+            // Leads that only exist on this phone would be lost: try once more, then ask.
+            if (DB.leads.some(l => l._dirty || l.queuedOffline)) { b.disabled = true; await flushQueued(); b.disabled = false; }
+            const pending = DB.leads.filter(l => l._dirty || l.queuedOffline).length;
+            if (pending && !window.confirm(I18N.lang === 'it'
+                ? pending + ' lead non sono ancora arrivati al server e andranno persi uscendo. Uscire comunque?'
+                : pending + ' leads have not reached the server yet and will be lost if you sign out. Sign out anyway?')) return;
+            setToken(''); S.user=null; DB.leads=[]; saveState(); closeModal(); go('#/login');
+          }; },0);
         };
         const inst = $('#installApp'); if (inst) inst.onclick = async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); try { await deferredPrompt.userChoice; } catch(e){} deferredPrompt = null; render(); };
       }});
@@ -715,9 +766,6 @@
       '</div>';
   }
 
-  const presetSummary = ev => ['provenienza','country','interesse']
-    .map(k => k === 'country' ? (ev.preset[k] && tc(ev.preset[k])) : ev.preset[k])
-    .filter(Boolean).join(' · ') || t('no presets');
   const stat = (n,l,c) => '<div class="stat"><div class="num '+(c||'')+'">'+n+'</div><div class="lbl">'+esc(l)+'</div></div>';
 
   /* The one screen that decides where this capture session goes: what kind of
@@ -873,7 +921,9 @@
   // Send the image to the serverless OpenAI proxy; fall back to demo data on failure
   async function runScan(dataURL) {
     try {
-      const res = await fetch('/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataURL }) });
+      const res = await fetch('/api/scan', { method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, getToken() ? { Authorization: 'Bearer ' + getToken() } : {}),
+        body: JSON.stringify({ image: dataURL }) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
       finishScan(data, dataURL, true);
@@ -884,10 +934,10 @@
 
   function finishScan(d, image, isReal, errMsg) {
     d = d || {};
-    const ev = activeEvent();
+    const ev = captureType() === 'event' ? activeEvent() : null;   // meetings take no event preset
     const preset = (ev && ev.preset) || { provenienza: '', country: '', interesse: '' };
     const lead = {
-      id: 'l' + Date.now(),
+      id: newLeadId(),
       first: d.first || '', last: d.last || '', company: d.company || '', role: d.role || '',
       email: d.email || '', phone: d.phone || '', website: d.website || '', address: d.address || '',
       provenienza: sourceValue(), country: d.country || preset.country || '', interesse: preset.interesse || '',
@@ -925,7 +975,7 @@
 
       (l.status==='Error' ? '<div class="banner" style="background:#FEF2F2;border-color:#FECACA;color:#991B1B">'+ic.alert+'<div>'+esc(l.error||t('Send failed'))+'</div></div>' : '') +
 
-      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(t('Contact'))+'</h3><span class="pill indigo">'+ic.bolt+' '+esc(t('AI extracted'))+'</span></div><p class="hint">'+esc(t('Confirm or fix the fields below.'))+'</p>' + (l.image ? '<img src="'+l.image+'" alt="business card" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;margin-bottom:12px;border:1px solid var(--line)">' : '') + contactFields + '</div>' +
+      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(t('Contact'))+'</h3><span class="pill indigo">'+ic.bolt+' '+esc(t('AI extracted'))+'</span></div><p class="hint">'+esc(t('Confirm or fix the fields below.'))+'</p>' + (imgSrc(l.image) ? '<img src="'+imgSrc(l.image)+'" alt="business card" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;margin-bottom:12px;border:1px solid var(--line)">' : '') + contactFields + '</div>' +
 
       '<div class="card"><h3>'+esc(t('Qualification'))+'</h3><p class="hint">'+esc(t('Required before sending. Managed as closed lists by admin.'))+'</p>' +
         '<div class="kv"><span class="k">'+esc(t('Source'))+'</span><span class="v">'+esc(sourceDisplay(l.provenienza) || '—')+'</span></div>' +
@@ -952,11 +1002,13 @@
 
     shell(t('Lead'), l.company||'', body, null, { back: history.length>1 ? null : '#/leads', right:'<button class="back" data-nav="#/leads">'+ic.chevL+esc(t('Leads'))+'</button>', bind(){
       // live updates
-      app.querySelectorAll('[data-f]').forEach(inp => inp.oninput = () => { l[inp.getAttribute('data-f')] = inp.value; });
-      app.querySelectorAll('[data-q]').forEach(sel => sel.onchange = () => { l[sel.getAttribute('data-q')] = sel.value; });
+      // Every change is kept: locally at once, on the server a moment after typing stops.
+      const soon = () => { clearTimeout(saveTimers.get(l.id)); saveTimers.set(l.id, setTimeout(() => saveLead(l), 800)); };
+      app.querySelectorAll('[data-f]').forEach(inp => inp.oninput = () => { l[inp.getAttribute('data-f')] = inp.value; l._dirty = true; saveState(); soon(); });
+      app.querySelectorAll('[data-q]').forEach(sel => sel.onchange = () => { l[sel.getAttribute('data-q')] = sel.value; saveLead(l); });
       const ow = app.querySelector('[data-owner]');
       if (ow) ow.onchange = () => { l.ownerId = ow.value; saveState(); saveLead(l); toast(t('Assigned to') + ' ' + userName(l.ownerId), 'ok'); };
-      bindSegChips(l, () => leadScreen(l.id));
+      bindSegChips(l, () => { saveLead(l); leadScreen(l.id); });
       const nk = $('#newsOk'); if (nk) nk.onchange = () => { l.newsletter = nk.checked; saveState(); saveLead(l); };
       const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; saveState(); saveLead(l); toast(t('Draft saved'),'ok'); go('#/leads'); };
       const sb = $('#send'); if (sb) sb.onclick = () => sendLead(l);
@@ -1024,14 +1076,14 @@
     const when = has ? new Date(l.consentAt).toLocaleString(I18N.lang === 'it' ? 'it-IT' : 'en-GB') : '';
     if (readOnly) {
       return '<div class="card"><h3>'+esc(t('Consent'))+'</h3>' + (has
-        ? '<div class="tags"><span class="pill green">'+ic.check+' '+esc(t('Consent signed'))+'</span></div><p class="hint" style="margin:8px 0 0">'+esc(when)+'</p>' + (l.consentSignature ? '<img src="'+l.consentSignature+'" alt="signature" style="margin-top:8px;max-height:90px;border:1px solid var(--line);border-radius:10px;background:#fff">' : '')
+        ? '<div class="tags"><span class="pill green">'+ic.check+' '+esc(t('Consent signed'))+'</span></div><p class="hint" style="margin:8px 0 0">'+esc(when)+'</p>' + (imgSrc(l.consentSignature) ? '<img src="'+imgSrc(l.consentSignature)+'" alt="signature" style="margin-top:8px;max-height:90px;border:1px solid var(--line);border-radius:10px;background:#fff">' : '')
         : '<p class="hint">'+esc(t('No consent captured.'))+'</p>') + '</div>';
     }
     const req = DB.requireConsent;
     return '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(t('Consent'))+(req?' <span class="req">*</span>':'')+'</h3>'+(has?'<span class="pill green">'+ic.check+' '+esc(t('signed'))+'</span>':'')+'</div>' +
       '<p class="hint">'+esc(I18N.lang === 'it' ? 'Il contatto acconsente a essere ricontattato da '+DB.company.name+' riguardo ai prodotti e servizi di cui avete parlato. Firma qui sotto.' : 'The contact agrees to be contacted by '+DB.company.name+' about the products and services discussed. Sign below.')+'</p>' +
-      (has && l.consentSignature
-        ? '<img src="'+l.consentSignature+'" alt="signature" style="width:100%;max-height:120px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#fff">' +
+      (has && imgSrc(l.consentSignature)
+        ? '<img src="'+imgSrc(l.consentSignature)+'" alt="signature" style="width:100%;max-height:120px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#fff">' +
           '<button class="btn ghost sm" id="reSign" style="margin-top:10px">'+esc(t('Re-sign'))+'</button>'
         : '<canvas id="sigPad" style="width:100%;height:150px;border:1.5px dashed var(--line);border-radius:12px;background:#fff;touch-action:none"></canvas>' +
           '<div class="btnrow" style="margin-top:10px"><button class="btn ghost sm" id="sigClear">'+esc(t('Clear'))+'</button><button class="btn soft sm" id="sigSave">'+esc(t('Save signature'))+'</button></div>') +
@@ -1065,11 +1117,14 @@
   }
 
   async function sendLead(l) {
+    if (sending.has(l.id)) return;     // a second tap, or a re-render mid-send
     if (!requiredFilled(l)) { toast(t('Fill all required qualification fields'), 'err'); return; }
     if (DB.requireConsent && !l.consentAt) { toast(t('Consent signature required before sending'), 'err'); return; }
-    if (!S.online) { l.status = 'Ready'; l.queuedOffline = true; saveState(); toast(t('Offline — queued, will sync automatically'), ''); go('#/leads'); return; }
+    if (!S.online) { l.status = 'Ready'; l.queuedOffline = true; saveLead(l); toast(t('Offline — queued, will sync automatically'), ''); go('#/leads'); return; }
     const btn = $('#send'); if (btn){ btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> ' + esc(t('Sending…')); }
-    const ok = await deliverLead(l);
+    sending.add(l.id); window.__bizcaBusy = true;
+    let ok = false;
+    try { ok = await deliverLead(l); } finally { sending.delete(l.id); window.__bizcaBusy = sending.size > 0; }
     saveState();
     if (ok) toast(DB.ms && DB.ms.enabled ? (I18N.lang === 'it' ? 'Inviato a Brevo ed Excel' : 'Sent to Brevo + Excel') : (I18N.lang === 'it' ? 'Inviato a Brevo' : 'Sent to Brevo'), 'ok');
     else toast(t('Brevo send failed — see details'), 'err');
@@ -1111,7 +1166,7 @@
   function batchScreen() {
     const q = DB.leads.filter(l => l.createdBy === user().id && l.status !== 'Sent').sort((a,b)=>b.ts-a.ts);
     const body =
-      '<div class="banner">'+ic.grid+'<div>'+esc(I18N.lang === 'it' ? 'Rivedi i biglietti acquisiti, applica il preset dell\'evento a tutti, assegna in automatico e invia quelli pronti.' : 'Review captured cards, apply the event preset in bulk, auto-assign and send the ready ones.')+'</div></div>' +
+      '<div class="banner">'+ic.grid+'<div>'+esc(I18N.lang === 'it' ? 'Rivedi i biglietti acquisiti, applica il preset dell\'evento a quelli senza dati e invia quelli pronti.' : 'Review captured cards, apply the event preset where fields are empty, and send the ready ones.')+'</div></div>' +
       (q.length ? (
         '<button class="btn soft sm" id="applyPreset" style="margin-bottom:14px">'+esc(t('Apply preset'))+'</button>' +
         q.map(l => {
@@ -1125,7 +1180,7 @@
     shell(t('Batch queue'), tp('n_cards', q.length), body, null, { back:'#/home', bind(){
       app.querySelectorAll('[data-sel]').forEach(c => c.onclick = () => { const id=c.getAttribute('data-sel'); batchSel.has(id)?batchSel.delete(id):batchSel.add(id); batchScreen(); });
       app.querySelectorAll('[data-open]').forEach(m => m.onclick = () => go('#/lead?id=' + m.getAttribute('data-open')));
-      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast(t('No active event'),'err'); return; } q.forEach(l=>{ if(!l.provenienza)l.provenienza=sourceValue(); if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(!l.ownerId)l.ownerId=user().id; if(requiredFilled(l))l.status='Ready'; }); q.forEach(saveLead); toast(t('Preset applied to queue'),'ok'); batchScreen(); };
+      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast(t('No active event'),'err'); return; } q.forEach(l=>{ if(l.captureType==='meeting') return; if(!l.provenienza)l.provenienza=sourceValue(); if(ev.preset.country&&!l.country)l.country=ev.preset.country; if(ev.preset.interesse&&!l.interesse)l.interesse=ev.preset.interesse; if(!l.ownerId)l.ownerId=user().id; if(requiredFilled(l))l.status='Ready'; }); q.forEach(saveLead); toast(t('Preset applied to queue'),'ok'); batchScreen(); };
       const ss=$('#sendSel'); if(ss) ss.onclick = async () => {
         if(!batchSel.size){ toast(t('Select at least one lead'),'err'); return; }
         if(!S.online){ let q2=0; batchSel.forEach(id=>{ const l=DB.leads.find(x=>x.id===id); if(l&&requiredFilled(l)){ l.status='Ready'; l.queuedOffline=true; q2++; } }); batchSel.clear(); saveState(); toast(tp('n_leads_queued_offline', q2),'' ); batchScreen(); return; }
@@ -1285,7 +1340,7 @@
           hint: I18N.lang === 'it' ? 'Da dove arriva il contatto (es. "MECSPE 2026", "Passaggio allo stand", "Segnalazione"). Il commerciale ne sceglie uno quando qualifica il lead.' : 'Where the contact came from (e.g. "MECSPE 2026", "Booth walk-in", "Referral"). Sellers pick one when qualifying a lead.',
           ph: I18N.lang === 'it' ? 'es. Passaggio allo stand' : 'e.g. Booth walk-in' }
       : { title: t('Segments'),
-          hint: I18N.lang === 'it' ? 'Che cosa interessa al contatto: le vostre linee di prodotto o aree di business. Il commerciale ne sceglie una quando qualifica il lead.' : 'What the contact is interested in — your product lines or business areas. Sellers pick one when qualifying a lead.',
+          hint: I18N.lang === 'it' ? 'Che cosa interessa al contatto: le vostre linee di prodotto o aree di business. Il commerciale ne sceglie una o più quando qualifica il lead.' : 'What the contact is interested in — your product lines or business areas. Sellers pick one or more when qualifying a lead.',
           ph: I18N.lang === 'it' ? 'es. Automazione industriale' : 'e.g. Industrial Automation' };
     const values = DB.pickLists[type];
     const rows = values.length
@@ -1302,7 +1357,7 @@
       app.querySelectorAll('[data-toggle]').forEach(sw => sw.onclick = () => { const v=values.find(x=>x.id===sw.getAttribute('data-toggle')); v.active=!v.active; saveState(); push('PATCH','/picklists/'+v.id,{active:v.active}); adminPickList(type); });
       app.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
         const v = values.find(x=>x.id===b.getAttribute('data-del'));
-        const used = DB.leads.filter(l => (type==='provenienza'?l.provenienza:l.interesse) === v.value).length;
+        const used = DB.leads.filter(l => type==='provenienza' ? l.provenienza === v.value : segList(l.interesse).indexOf(v.value) >= 0).length;
         modal('<h3>'+esc(I18N.lang === 'it' ? 'Eliminare "'+v.value+'"?' : 'Delete "'+v.value+'"?')+'</h3><p class="hint">'+esc((used ? tp('n_used_by_leads', used) : '') + t('It will no longer be selectable.'))+'</p>' +
           '<button class="btn danger" id="delYes">'+esc(t('Delete'))+'</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">'+esc(t('Cancel'))+'</button>');
         setTimeout(()=>{ const y=document.getElementById('delYes'); if(y) y.onclick=()=>{ DB.pickLists[type]=values.filter(x=>x.id!==v.id); saveState(); push('DELETE','/picklists/'+v.id); closeModal(); toast(t('Value deleted'),'ok'); adminPickList(type); }; },0);
@@ -1526,9 +1581,8 @@
       '<div class="card"><h3>'+esc(t('Brevo account (API key)'))+'</h3><p class="hint">'+esc(I18N.lang === 'it' ? 'L\'amministratore imposta qui la chiave API di Brevo. Cambiala per puntare Bizca su un altro account Brevo. Attuale: ' : 'The admin sets the Brevo API key here. Change it to point Bizca at a different Brevo account. Current: ')+'<b>'+esc(keyMask)+'</b></p>' +
         '<div class="field" style="margin-bottom:10px"><label>'+esc(t('Brevo API key'))+'</label><input class="input" id="brevoKey" type="password" placeholder="xkeysib-…" autocomplete="off"></div>' +
         '<div class="btnrow"><button class="btn soft sm" id="brevoKeySave">'+esc(t('Save key'))+'</button>' + (DB.brevoApiKey ? '<button class="btn ghost sm" id="brevoKeyClear">'+esc(t('Use server default'))+'</button>' : '') + '</div>' +
-        '<p class="hint" style="margin:10px 0 0">'+esc(I18N.lang === 'it' ? 'Salvata su questo dispositivo. Per una conservazione condivisa e cifrata usa un segreto lato server (consigliato in produzione).' : 'Stored on this device. For a shared, encrypted store use a server-side secret (recommended for production).')+'</p></div>' +
+        '<p class="hint" style="margin:10px 0 0">'+esc(I18N.lang === 'it' ? 'Salvata sul server dello spazio di lavoro e usata da tutti i dispositivi dell\'azienda.' : 'Saved on the workspace server and used by every device in the company.')+'</p></div>' +
       '<div class="card"><h3>'+esc(t('Sending & consent'))+'</h3>' +
-        '<div class="kv"><span class="k">'+esc(t('Auto-send when lead is Ready'))+'</span><div class="switch '+(DB.autoSend?'on':'')+'" id="auto"></div></div>' +
         '<div class="kv" style="border:none"><span class="k">'+esc(t('Require consent signature before sending'))+'</span><div class="switch '+(DB.requireConsent?'on':'')+'" id="reqConsent"></div></div></div>' +
       newsletterCard() +
       '<div class="card"><h3>'+esc(t('Brevo attributes'))+'</h3><p class="hint">'+esc(I18N.lang === 'it' ? 'Crea nel tuo account Brevo i campi contatto su cui Bizca scrive (nome, azienda, provenienza, paese, segmento, evento, titolare, consenso…). Da lanciare una volta sola per account.' : 'Create the contact fields Bizca maps to (name, company, source, country, interest, event, owner, consent…) in your Brevo account. Run once per account.')+'</p><button class="btn soft" id="brevoSetup">'+esc(t('Prepare Brevo attributes'))+'</button></div>' +
@@ -1541,7 +1595,6 @@
         saveState(); push('PATCH','/settings',{ newsletterListId: DB.newsletterListId });
         toast(t('Newsletter list updated'),'ok');
       };
-      $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; saveState(); push('PATCH','/settings',{autoSend:DB.autoSend}); toast(t('Auto-send when lead is Ready')+' · '+(DB.autoSend?t('enabled'):t('disabled')),'ok'); adminDest(); };
       $('#reqConsent').onclick = () => { DB.requireConsent=!DB.requireConsent; saveState(); push('PATCH','/settings',{requireConsent:DB.requireConsent}); toast(t('Consent')+' · '+(DB.requireConsent?(I18N.lang === 'it' ? 'obbligatorio' : 'required'):(I18N.lang === 'it' ? 'facoltativo' : 'optional')),'ok'); adminDest(); };
       const ks = $('#brevoKeySave'); if (ks) ks.onclick = () => { const v=($('#brevoKey').value||'').trim(); if(!v){toast(t('Enter a key'),'err');return;} DB.brevoApiKey=v; brevoLists=null; saveState(); push('PATCH','/settings',{brevoApiKey:v}); toast(t('Brevo key saved'),'ok'); adminDest(); };
       const kc = $('#brevoKeyClear'); if (kc) kc.onclick = () => { DB.brevoApiKey=''; brevoLists=null; saveState(); push('PATCH','/settings',{brevoApiKey:''}); toast(t('Brevo key removed'),'ok'); adminDest(); };
@@ -1639,6 +1692,8 @@
     }
     if (path === '#/setup' || path === '#/welcome' || path === '#/activate') return go(S.user ? '#/home' : '#/login');
     if (path !== '#/login' && !S.user) return go('#/login');
+    // The server refuses admin actions anyway; this keeps sellers off the screens.
+    if (path.indexOf('#/admin') === 0 && !isAdmin()) return go('#/home');
     window.scrollTo(0,0);
     switch (path) {
       case '#/login': return loginScreen();
@@ -1661,6 +1716,13 @@
   window.addEventListener('hashchange', render);
 
   /* ---------- start ---------- */
+  /* Push what is waiting first, then refresh from the server — in that order,
+     so the refresh never runs on top of a send in progress. */
+  function syncNow() {
+    if (!getToken() || !S.online) return Promise.resolve();
+    return flushQueued().then(() => pullState()).then(() => render()).catch(() => {});
+  }
+
   (async function start() {
     loadState();                       // offline cache first, so something shows instantly
     applyLang();                       // before the first render, so nothing flashes in English
@@ -1678,7 +1740,7 @@
         toast(t('Signed in with Microsoft'), 'ok');
         location.hash = '#/home';
         render();
-        window.addEventListener('online', () => { if (getToken()) pullState().then(() => render()).catch(() => {}); });
+        window.addEventListener('online', syncNow);
         return;
       } catch (e) { toast(e.message, 'err'); }
     }
@@ -1694,7 +1756,9 @@
       } catch (e) {
         if (e.status === 401) { setToken(''); S.user = null; location.hash = '#/login'; }
         else if (!DB.company.configured) location.hash = '#/welcome';
-        // otherwise: stay on the cached workspace (offline)
+        // Offline with a saved session: open the cached workspace, not the sign-in
+        // screen — signing in needs the network, capturing cards does not.
+        else if (S.user && (!location.hash || ['#/login', '#/', '#/setup', '#/welcome'].indexOf(location.hash) >= 0)) location.hash = '#/home';
       }
     } else {
       S.user = null;
@@ -1703,9 +1767,9 @@
       if (['#/setup', '#/login', '#/activate'].indexOf(path) === -1) location.hash = DB.company.configured ? '#/login' : '#/welcome';
     }
     render();
-    // Refresh from the server when the connection comes back
-    window.addEventListener('online', () => { if (getToken()) pullState().then(() => render()).catch(() => {}); });
-    // Rows that failed to reach the shared file last time are retried at start-up too.
-    if (getToken() && S.online) flushExcelBacklog().then(n => { if (n) { toast(tp('n_rows_written', n), 'ok'); render(); } }).catch(() => {});
+    // When the connection comes back, and once now: anything left over from the
+    // last session (unsaved leads, queued sends, Excel rows) goes out first.
+    window.addEventListener('online', syncNow);
+    if (getToken() && S.online) flushQueued().then(() => render()).catch(() => {});
   })();
 })();

@@ -14,7 +14,9 @@ const msauth = require('./msauth');
 
 const PORT = process.env.PORT || 3000;
 const APP_URL = (process.env.APP_URL || 'https://bizca.vercel.app').replace(/\/$/, '');
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-change-me';
+// Never fall back to a known value: without JWT_SECRET anyone could forge a login.
+// A random secret keeps the server safe (sessions just reset on restart).
+const JWT_SECRET = process.env.JWT_SECRET || (console.error('JWT_SECRET is not set — using a random one'), crypto.randomBytes(48).toString('hex'));
 const BREVO_KEY = process.env.BREVO_TRANSACTIONAL_KEY || '';
 const SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL || 'no-reply@bryan.it';
 const SENDER_NAME = process.env.BREVO_SENDER_NAME || 'Bizca';
@@ -23,7 +25,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-25-excel2';
+const BUILD = '2026-09-25-audit1';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
 
 const pool = new Pool({
@@ -58,16 +60,19 @@ function verifyToken(token) {
     return payload;
   } catch (e) { return null; }
 }
-function hashPassword(pw, salt) {
+const scryptAsync = require('util').promisify(crypto.scrypt);
+// Async on purpose: the sync version blocks the only thread on every login,
+// so a burst of attempts would freeze the API for everybody.
+async function hashPassword(pw, salt) {
   const s = salt || crypto.randomBytes(16).toString('hex');
-  const h = crypto.scryptSync(String(pw), s, 32).toString('hex');
+  const h = (await scryptAsync(String(pw), s, 32)).toString('hex');
   return s + ':' + h;
 }
-function checkPassword(pw, stored) {
+async function checkPassword(pw, stored) {
   if (!stored || stored.indexOf(':') < 0) return false;
   const [s, h] = stored.split(':');
-  const calc = crypto.scryptSync(String(pw), s, 32).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(calc));
+  const calc = (await scryptAsync(String(pw), s, 32)).toString('hex');
+  return h.length === calc.length && crypto.timingSafeEqual(Buffer.from(h), Buffer.from(calc));
 }
 const isEmail = e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || ''));
 
@@ -94,7 +99,10 @@ async function sendEmail(to, subject, html) {
 function auth(req, res, next) {
   const h = req.headers.authorization || '';
   const p = verifyToken(h.replace(/^Bearer\s+/i, ''));
-  if (!p) return res.status(401).json({ error: 'Not signed in' });
+  // Only session tokens open the API. Short-lived state tokens (Microsoft sign-in,
+  // admin consent) are signed with the same key but always carry a purpose "k":
+  // they must never be accepted here, or anyone could turn one into a login.
+  if (!p || p.k || !p.uid) return res.status(401).json({ error: 'Not signed in' });
   pool.query('SELECT id,company_id,role,status FROM users WHERE id=$1', [p.uid])
     .then(r => {
       if (!r.rowCount) return res.status(401).json({ error: 'Account no longer exists' });
@@ -160,7 +168,7 @@ app.post('/auth/register', wrap(async (req, res) => {
     );
     await client.query(
       'INSERT INTO users (id,company_id,name,email,password_hash,role,status,email_verified,verify_token,verify_sent_at,locale) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10)',
-      [uid, cid, name, String(email).toLowerCase(), hashPassword(password), 'admin', 'active', false, token, lang]
+      [uid, cid, name, String(email).toLowerCase(), await hashPassword(password), 'admin', 'active', false, token, lang]
     );
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
@@ -188,7 +196,14 @@ app.post('/auth/resend', wrap(async (req, res) => {
   const { email, locale } = req.body || {};
   const r = await pool.query('SELECT id,name,email,email_verified,locale FROM users WHERE lower(email)=lower($1)', [email || '']);
   if (!r.rowCount || r.rows[0].email_verified) return res.json({ ok: true }); // do not reveal account state
-  const token = crypto.randomBytes(24).toString('hex');
+  const u0 = await pool.query('SELECT verify_token, verify_sent_at, password_hash FROM users WHERE id=$1', [r.rows[0].id]);
+  const cur = u0.rows[0] || {};
+  // Invited users (no password yet) activate from their invitation link: this
+  // public route must not replace that token, or anyone could cancel an invite.
+  if (!cur.password_hash) return res.json({ ok: true });
+  // One email a minute at most — this route needs no login.
+  if (cur.verify_sent_at && Date.now() - new Date(cur.verify_sent_at).getTime() < 60 * 1000) return res.json({ ok: true, emailSent: true });
+  const token = cur.verify_token || crypto.randomBytes(24).toString('hex');
   await pool.query('UPDATE users SET verify_token=$1, verify_sent_at=now() WHERE id=$2', [token, r.rows[0].id]);
   const link = (API_URL || '') + '/auth/verify?token=' + token;
   const msg = emails.build('resend', locale || r.rows[0].locale, { link });
@@ -202,7 +217,7 @@ app.post('/auth/login', wrap(async (req, res) => {
   if (!r.rowCount) return res.status(401).json({ error: 'Account not found — ask your admin to invite you' });
   const u = r.rows[0];
   if (u.status !== 'active') return res.status(403).json({ error: 'This account is disabled' });
-  if (!u.password_hash || !checkPassword(password || '', u.password_hash)) return res.status(401).json({ error: 'Wrong email or password' });
+  if (!u.password_hash || !(await checkPassword(password || '', u.password_hash))) return res.status(401).json({ error: 'Wrong email or password' });
   if (!u.email_verified) return res.status(403).json({ error: 'Please confirm your email first', needsVerification: true });
   res.json({ ok: true, token: session(u), user: outUser(u) });
 }));
@@ -245,7 +260,7 @@ app.post('/auth/set-password', wrap(async (req, res) => {
   const u = r.rows[0];
   await pool.query(
     'UPDATE users SET password_hash=$1, email_verified=true, verify_token=NULL, name=COALESCE(NULLIF($2,\'\'),name), locale=COALESCE($3,locale) WHERE id=$4',
-    [hashPassword(password), (name || '').trim(), locale ? emails.pick(locale) : null, u.id]
+    [await hashPassword(password), (name || '').trim(), locale ? emails.pick(locale) : null, u.id]
   );
   const fresh = await pool.query('SELECT * FROM users WHERE id=$1', [u.id]);
   res.json({ ok: true, token: session(fresh.rows[0]), user: outUser(fresh.rows[0]) });
@@ -298,13 +313,16 @@ app.get('/state', auth, wrap(async (req, res) => {
 app.patch('/settings', auth, requireAdmin, wrap(async (req, res) => {
   const body = Object.assign({}, req.body || {});
   const locale = body.locale; delete body.locale;
+  // Microsoft settings have their own validated route (/ms/config); never here.
+  delete body.ms;
   const cur = await pool.query('SELECT settings FROM companies WHERE id=$1', [req.session.cid]);
   const merged = Object.assign({}, cur.rows[0].settings || {}, body);
   await pool.query('UPDATE companies SET settings=$1 WHERE id=$2', [merged, req.session.cid]);
   if (typeof locale === 'string') {
     await pool.query('UPDATE companies SET locale=$1 WHERE id=$2', [emails.pick(locale), req.session.cid]);
   }
-  res.json({ ok: true, settings: merged });
+  const { ms: _hidden, ...visible } = merged;   // the client secret never goes back to a browser
+  res.json({ ok: true, settings: visible });
 }));
 
 /* The signed-in user's own preferences. locale:null clears the personal choice
@@ -379,6 +397,8 @@ app.post('/users/:uid/resend', auth, requireAdmin, wrap(async (req, res) => {
 
 app.patch('/users/:uid', auth, requireAdmin, wrap(async (req, res) => {
   const { role, status, name } = req.body || {};
+  if (role !== undefined && ['admin', 'seller'].indexOf(role) < 0) return res.status(400).json({ error: 'Invalid role' });
+  if (status !== undefined && ['active', 'disabled'].indexOf(status) < 0) return res.status(400).json({ error: 'Invalid status' });
   const target = await pool.query('SELECT * FROM users WHERE id=$1 AND company_id=$2', [req.params.uid, req.session.cid]);
   if (!target.rowCount) return res.status(404).json({ error: 'User not found' });
   if (req.params.uid === req.session.uid && (status === 'disabled' || role === 'seller')) {
@@ -409,8 +429,11 @@ app.patch('/events/:eid', auth, requireAdmin, wrap(async (req, res) => {
   const { name, startDate, endDate, preset, brevoListId, status } = req.body || {};
   const own = await pool.query('SELECT 1 FROM events WHERE id=$1 AND company_id=$2', [req.params.eid, req.session.cid]);
   if (!own.rowCount) return res.status(404).json({ error: 'Event not found' });
-  await pool.query('UPDATE events SET name=COALESCE($1,name), start_date=COALESCE($2,start_date), end_date=COALESCE($3,end_date), preset=COALESCE($4,preset), brevo_list_id=$5, status=COALESCE($6,status) WHERE id=$7',
-    [name || null, startDate || null, endDate || null, preset || null, (brevoListId === undefined ? null : brevoListId), status || null, req.params.eid]);
+  // brevoListId: absent = leave it alone, null = clear it, number = set it.
+  const setList = Object.prototype.hasOwnProperty.call(req.body || {}, 'brevoListId');
+  const listVal = setList && Number.isFinite(parseInt(brevoListId, 10)) ? parseInt(brevoListId, 10) : null;
+  await pool.query('UPDATE events SET name=COALESCE($1,name), start_date=COALESCE($2,start_date), end_date=COALESCE($3,end_date), preset=COALESCE($4,preset), brevo_list_id=CASE WHEN $8 THEN $5 ELSE brevo_list_id END, status=COALESCE($6,status) WHERE id=$7',
+    [name || null, startDate || null, endDate || null, preset || null, listVal, status || null, req.params.eid, setList]);
   const r = await pool.query('SELECT * FROM events WHERE id=$1', [req.params.eid]);
   res.json({ ok: true, event: outEvent(r.rows[0]) });
 }));
@@ -466,14 +489,36 @@ app.delete('/rules/:rid', auth, requireAdmin, wrap(async (req, res) => {
 }));
 
 /* ---------- leads ---------- */
+const LEAD_STATUSES = ['Captured', 'To finalize', 'Ready', 'Sent', 'Error'];
+const MAX_IMAGE = 3 * 1024 * 1024;   // a downscaled card photo is ~150 KB; this is a generous ceiling
+// Only our own downscaled photos and signatures: a data URL of an image, nothing else.
+const safeImage = v => (typeof v === 'string' && /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/.test(v) && v.length <= MAX_IMAGE) ? v : null;
+
 app.put('/leads/:lid', auth, wrap(async (req, res) => {
+  // Ids end up inside HTML attributes on other people's screens: keep them plain.
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(req.params.lid)) return res.status(400).json({ error: 'Invalid lead id' });
   const l = req.body || {};
   const cid = req.session.cid;
-  const existing = await pool.query('SELECT created_by FROM leads WHERE id=$1 AND company_id=$2', [req.params.lid, cid]);
-  if (existing.rowCount && req.session.role !== 'admin' && existing.rows[0].created_by !== req.session.uid) {
+  const uid = req.session.uid;
+  const existing = await pool.query('SELECT created_by, owner_id FROM leads WHERE id=$1 AND company_id=$2', [req.params.lid, cid]);
+  // The creator, the person it is assigned to, and admins may edit a lead —
+  // the same rule /state and /ms/append already use.
+  if (existing.rowCount && req.session.role !== 'admin'
+      && existing.rows[0].created_by !== uid && existing.rows[0].owner_id !== uid) {
     return res.status(403).json({ error: 'Not your lead' });
   }
-  await pool.query(
+
+  // Ids that point elsewhere are never trusted: owner and event must belong to this company.
+  const [own, ev] = await Promise.all([
+    l.ownerId ? pool.query('SELECT 1 FROM users WHERE id=$1 AND company_id=$2', [l.ownerId, cid]) : { rowCount: 0 },
+    l.eventId ? pool.query('SELECT 1 FROM events WHERE id=$1 AND company_id=$2', [l.eventId, cid]) : { rowCount: 0 }
+  ]);
+  const ownerId = own.rowCount ? l.ownerId : uid;
+  const eventId = ev.rowCount ? l.eventId : null;
+  const status = LEAD_STATUSES.indexOf(l.status) >= 0 ? l.status : 'To finalize';
+  const clip = (v, n) => String(v == null ? '' : v).slice(0, n);
+
+  const r = await pool.query(
     `INSERT INTO leads (id,company_id,event_id,owner_id,created_by,first_name,last_name,company_name,role_title,email,phone,website,address,source,country,segment,status,override_flag,error,card_image,consent_at,consent_sig,newsletter,capture_type,brevo_list_id,captured_at,updated_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,to_timestamp($26/1000.0),now())
      ON CONFLICT (id) DO UPDATE SET event_id=EXCLUDED.event_id, owner_id=EXCLUDED.owner_id, first_name=EXCLUDED.first_name,
@@ -481,14 +526,20 @@ app.put('/leads/:lid', auth, wrap(async (req, res) => {
        phone=EXCLUDED.phone, website=EXCLUDED.website, address=EXCLUDED.address, source=EXCLUDED.source, country=EXCLUDED.country,
        segment=EXCLUDED.segment, status=EXCLUDED.status, override_flag=EXCLUDED.override_flag, error=EXCLUDED.error,
        card_image=EXCLUDED.card_image, consent_at=EXCLUDED.consent_at, consent_sig=EXCLUDED.consent_sig,
-       newsletter=EXCLUDED.newsletter, capture_type=EXCLUDED.capture_type, brevo_list_id=EXCLUDED.brevo_list_id, updated_at=now()`,
-    [req.params.lid, cid, l.eventId || null, l.ownerId || null, l.createdBy || req.session.uid,
-     l.first || '', l.last || '', l.company || '', l.role || '', l.email || '', l.phone || '', l.website || '', l.address || '',
-     l.provenienza || '', l.country || '', l.interesse || '', l.status || 'To finalize', !!l.override, l.error || null,
-     l.image || null, l.consentAt ? new Date(l.consentAt) : null, l.consentSignature || null,
-     !!l.newsletter, l.captureType || null, Number.isFinite(parseInt(l.brevoListId, 10)) ? parseInt(l.brevoListId, 10) : null,
-     l.ts || Date.now()]
+       newsletter=EXCLUDED.newsletter, capture_type=EXCLUDED.capture_type, brevo_list_id=EXCLUDED.brevo_list_id, updated_at=now()
+     WHERE leads.company_id = EXCLUDED.company_id
+     RETURNING id`,
+    [req.params.lid, cid, eventId, ownerId, uid,   // created_by is the caller, never taken from the body
+     clip(l.first, 200), clip(l.last, 200), clip(l.company, 300), clip(l.role, 200), clip(l.email, 320),
+     clip(l.phone, 80), clip(l.website, 300), clip(l.address, 500),
+     clip(l.provenienza, 100), clip(l.country, 100), clip(l.interesse, 1000), status, !!l.override, l.error ? clip(l.error, 500) : null,
+     safeImage(l.image), l.consentAt ? new Date(l.consentAt) : null, safeImage(l.consentSignature),
+     !!l.newsletter, ['event', 'meeting'].indexOf(l.captureType) >= 0 ? l.captureType : null,
+     Number.isFinite(parseInt(l.brevoListId, 10)) ? parseInt(l.brevoListId, 10) : null,
+     Number.isFinite(Number(l.ts)) ? Number(l.ts) : Date.now()]
   );
+  // No row back means the id already belongs to another company: refuse, never overwrite.
+  if (!r.rowCount) return res.status(409).json({ error: 'This lead id is already in use' });
   res.json({ ok: true });
 }));
 
@@ -510,6 +561,10 @@ ms.mount(app, { pool, auth, requireAdmin, wrap, sign, verifyToken, APP_URL, API_
 
 /* ---------- Sign in with a Microsoft work account ---------- */
 msauth.mount(app, { pool, ms, sign, verifyToken, session, outUser, APP_URL, API_URL });
+
+/* ---------- token check for the Vercel functions ---------- */
+// api/scan proxies OpenAI at our cost: it asks here before doing any work.
+app.get('/auth/check', auth, (req, res) => res.json({ ok: true }));
 
 /* ---------- email self-test (safe: reveals no secrets) ---------- */
 app.get('/email-status', wrap(async (req, res) => {

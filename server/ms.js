@@ -66,10 +66,19 @@ const isoDate = d => {
   const t = d instanceof Date ? d : new Date(d);
   return isNaN(t) ? '' : t.toISOString().slice(0, 10);
 };
+// Written in the customer's local time, not UTC: a card scanned at 11:30 in
+// Milan must read 11:30 in the file, not 09:30. Override with BIZCA_TZ if needed.
+const TZ = process.env.BIZCA_TZ || 'Europe/Rome';
 const isoDateTime = d => {
   if (!d) return '';
   const t = d instanceof Date ? d : new Date(d);
-  return isNaN(t) ? '' : t.toISOString().slice(0, 16).replace('T', ' ');
+  if (isNaN(t)) return '';
+  try {
+    // sv-SE formats as "YYYY-MM-DD HH:MM:SS", which Excel reads as a date.
+    return t.toLocaleString('sv-SE', { timeZone: TZ, hour12: false }).slice(0, 16);
+  } catch (e) {
+    return t.toISOString().slice(0, 16).replace('T', ' ');
+  }
 };
 
 /* ---------- configuration ---------- */
@@ -283,7 +292,18 @@ function mount(app, deps) {
   app.patch('/ms/config', auth, requireAdmin, wrap(async (req, res) => {
     const b = req.body || {};
     const patch = {};
-    if (typeof b.tenantId === 'string') patch.tenantId = b.tenantId.trim();
+    const cur = ((await loadSettings(req.session.cid)).ms) || {};
+    const willHaveOwnApp = !!((typeof b.clientId === 'string' ? b.clientId.trim() : cur.clientId) &&
+                              ((typeof b.clientSecret === 'string' && b.clientSecret.trim()) || cur.clientSecret)) && !b.clearSecret;
+    if (typeof b.tenantId === 'string') {
+      // With the shared Bizca app, the tenant must come from that tenant's own
+      // admin consent — never typed in, or one customer could point our shared
+      // credentials at another customer's Microsoft 365.
+      if (!willHaveOwnApp && b.tenantId.trim() !== (cur.tenantId || '')) {
+        return res.status(400).json({ error: 'With the shared Bizca app the tenant is set by admin consent, not by hand' });
+      }
+      patch.tenantId = b.tenantId.trim();
+    }
     if (typeof b.clientId === 'string') patch.clientId = b.clientId.trim();
     if (typeof b.clientSecret === 'string' && b.clientSecret.trim()) patch.clientSecret = b.clientSecret.trim();
     if (b.clearSecret) { patch.clientSecret = ''; patch.clientId = ''; }
@@ -403,6 +423,10 @@ function mount(app, deps) {
       if (req.session.role !== 'admin' && lead.created_by !== req.session.uid && lead.owner_id !== req.session.uid) {
         throw httpError(403, 'Not your lead');
       }
+      // The file only ever receives the final state of a sent lead. If the saved
+      // copy is not "Sent" yet, the save has not landed: refuse, and the app
+      // retries later instead of writing a stale "To finalize" row.
+      if (lead.status !== 'Sent') throw httpError(409, 'Lead is not saved as sent yet — the row will be written on retry');
 
       const token = await getToken(cid, cfg, fetchImpl);
       const headers = await tableHeaders(token, cfg, cfg.tableName, fetchImpl);

@@ -4,7 +4,6 @@
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.status(200).json({
-    googleClientId: process.env.GOOGLE_CLIENT_ID || '',
-    passwordLogin: !!process.env.BIZCA_APP_PASSWORD
+    googleClientId: process.env.GOOGLE_CLIENT_ID || ''
   });
 };

@@ -226,7 +226,7 @@ const admin = { session: { cid: 'c1', uid: 'u1', role: 'admin' } };
     assert.strictEqual(r.status, 200, JSON.stringify(r.body));
     const values = JSON.parse(g.calls.filter(c => /rows\/add/.test(c.url))[0].init.body).values[0];
     // headers: Data, Evento, Nome, Cognome, Azienda, Email, Paese, Segmento, Assegnato a, Note interne
-    assert.strictEqual(values[0], '2026-03-04 09:30');
+    assert.strictEqual(values[0], '2026-03-04 10:30');   // 09:30 UTC is 10:30 in Italy (winter time)
     assert.strictEqual(values[1], 'MECSPE 2026');
     assert.strictEqual(values[2], 'Anna');
     assert.strictEqual(values[3], 'Müller');
@@ -253,6 +253,21 @@ const admin = { session: { cid: 'c1', uid: 'u1', role: 'admin' } };
     const app = fakeApp(); ms.mount(app, deps(pool, g.fetch));
     await app.call('POST /ms/test', Object.assign({ body: {} }, admin));
     assert.strictEqual(pool.store.settings.ms.enabled, false);
+  });
+
+  await t('a lead not yet saved as Sent is refused, never written stale', async () => {
+    const g = fakeMs();
+    const pool = fakePool({ ms: { enabled: true, tenantId: 't', clientId: 'c', clientSecret: 's', driveId: 'd', itemId: 'i', tableName: 'T' } });
+    const orig = pool.query;
+    pool.query = async (sql, params) => {
+      const r = await orig(sql, params);
+      if (/FROM leads/.test(sql) && r.rows && r.rows[0]) r.rows[0] = Object.assign({}, r.rows[0], { status: 'To finalize' });
+      return r;
+    };
+    const app = fakeApp(); ms.mount(app, deps(pool, g.fetch));
+    const r = await app.call('POST /ms/append', Object.assign({ body: { leadId: 'l1' } }, admin));
+    assert.strictEqual(r.status, 409, JSON.stringify(r.body));
+    assert.ok(!g.calls.some(c => /rows\/add/.test(c.url)), 'no row may be written');
   });
 
   await t('the same lead is never written twice', async () => {

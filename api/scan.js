@@ -13,6 +13,19 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // Every scan costs us an OpenAI call: only signed-in Bizca users may use it.
+  // The backend is the one that knows whether a token is valid, so we ask it.
+  const auth = req.headers.authorization || '';
+  if (!/^Bearer\s+\S+/.test(auth)) { res.status(401).json({ error: 'Sign in to scan cards' }); return; }
+  try {
+    const api = (process.env.BIZCA_API_URL || 'https://bizca-production.up.railway.app').replace(/\/$/, '');
+    const chk = await fetch(api + '/auth/check', { headers: { authorization: auth } });
+    if (!chk.ok) { res.status(401).json({ error: 'Sign in to scan cards' }); return; }
+  } catch (e) {
+    res.status(503).json({ error: 'Could not verify your session — try again' });
+    return;
+  }
+
   try {
     // Parse body (Vercel usually populates req.body; fall back to raw stream)
     let body = req.body;
@@ -27,8 +40,10 @@ module.exports = async (req, res) => {
     }
 
     const image = body.image;
-    if (!image) {
-      res.status(400).json({ error: 'Missing image' });
+    // Only a photo taken in the app: a data URL, never a remote address that
+    // OpenAI would go and fetch at our expense.
+    if (typeof image !== 'string' || !/^data:image\/(png|jpe?g|webp);base64,/.test(image) || image.length > 4 * 1024 * 1024) {
+      res.status(400).json({ error: 'Missing or invalid image' });
       return;
     }
 
