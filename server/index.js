@@ -25,7 +25,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-25-invite2';
+const BUILD = '2026-09-25-bulk1';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
 
 const pool = new Pool({
@@ -543,11 +543,18 @@ app.put('/leads/:lid', auth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+/* Delete a lead. Admins can delete any lead of their company; everyone else
+   only the leads they captured. A lead that is not on the server (captured
+   offline and never saved) is simply "already gone". Brevo and Excel are not
+   touched: what was sent stays there. */
 app.delete('/leads/:lid', auth, wrap(async (req, res) => {
-  const q = req.session.role === 'admin'
-    ? await pool.query('DELETE FROM leads WHERE id=$1 AND company_id=$2', [req.params.lid, req.session.cid])
-    : await pool.query('DELETE FROM leads WHERE id=$1 AND company_id=$2 AND created_by=$3', [req.params.lid, req.session.cid, req.session.uid]);
-  res.json({ ok: q.rowCount > 0 });
+  const cur = await pool.query('SELECT created_by FROM leads WHERE id=$1 AND company_id=$2', [req.params.lid, req.session.cid]);
+  if (!cur.rowCount) return res.json({ ok: true, deleted: 0 });
+  if (req.session.role !== 'admin' && cur.rows[0].created_by !== req.session.uid) {
+    return res.status(403).json({ error: 'Only the person who captured this lead, or an admin, can delete it' });
+  }
+  const q = await pool.query('DELETE FROM leads WHERE id=$1 AND company_id=$2', [req.params.lid, req.session.cid]);
+  res.json({ ok: true, deleted: q.rowCount });
 }));
 
 app.post('/sync-log', auth, wrap(async (req, res) => {

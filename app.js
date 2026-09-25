@@ -1150,26 +1150,142 @@
   }
 
   /* ---------- Leads list ---------- */
+  /* ---------- actions on many leads ----------
+     Shared by the Leads page and the Batch queue, so both behave the same. */
+
+  // Send several leads. Already-sent ones are left alone; incomplete ones are
+  // skipped and counted; offline, the complete ones are queued.
+  async function sendMany(ids) {
+    const r = { sent: 0, fail: 0, skip: 0, already: 0, queued: 0 };
+    for (const id of ids) {
+      const l = DB.leads.find(x => x.id === id);
+      if (!l) continue;
+      if (l.status === 'Sent') { r.already++; continue; }
+      if (!requiredFilled(l) || (DB.requireConsent && !l.consentAt)) { r.skip++; continue; }
+      if (!S.online) { l.status = 'Ready'; l.queuedOffline = true; saveLead(l); r.queued++; continue; }
+      if (sending.has(l.id)) continue;
+      sending.add(l.id); window.__bizcaBusy = true;
+      try { (await deliverLead(l)) ? r.sent++ : r.fail++; }
+      finally { sending.delete(l.id); window.__bizcaBusy = sending.size > 0; }
+    }
+    saveState();
+    return r;
+  }
+  function sendManyMessage(r) {
+    if (r.queued && !r.sent) return tp('n_leads_queued_offline', r.queued);
+    const it = I18N.lang === 'it';
+    const parts = [it ? r.sent + ' inviati' : r.sent + ' sent'];
+    if (r.fail) parts.push(it ? r.fail + ' non riusciti' : r.fail + ' failed');
+    if (r.skip) parts.push(it ? r.skip + ' saltati perché incompleti' : r.skip + ' skipped (incomplete)');
+    if (r.already) parts.push(it ? r.already + ' già inviati' : r.already + ' already sent');
+    if (r.queued) parts.push(it ? r.queued + ' in coda' : r.queued + ' queued');
+    return parts.join(', ');
+  }
+
+  // Delete several leads. Only from Bizca: Brevo and Excel keep what was sent.
+  async function deleteMany(ids) {
+    const r = { deleted: 0, denied: 0, fail: 0 };
+    for (const id of ids) {
+      const l = DB.leads.find(x => x.id === id);
+      if (!l || sending.has(id)) continue;
+      try {
+        await api('DELETE', '/leads/' + id);
+        DB.leads = DB.leads.filter(x => x.id !== id);
+        r.deleted++;
+      } catch (e) { e.status === 403 ? r.denied++ : r.fail++; }
+    }
+    saveState();
+    return r;
+  }
+
   let leadFilter = 'all';
+  let leadSelecting = false;          // selection mode on the Leads page
+  const leadSel = new Set();
   function leadsScreen() {
     const mine = isAdmin() ? DB.leads : DB.leads.filter(l => l.createdBy === user().id || l.ownerId === user().id);
     const filters = ['all','To finalize','Ready','Sent','Error'];
     const counts = f => f==='all' ? mine.length : mine.filter(l=>l.status===f).length;
     const chips = filters.map(f => '<button class="pill '+(leadFilter===f?'indigo':'gray')+'" data-filter="'+f+'" style="border:none">'+esc(f==='all'?t('All'):statusLabel(f))+' · '+counts(f)+'</button>').join(' ');
     const list = mine.filter(l => leadFilter==='all' || l.status===leadFilter).sort((a,b)=>b.ts-a.ts);
+    // the selection only ever holds leads that still exist
+    [...leadSel].forEach(id => { if (!DB.leads.some(l => l.id === id)) leadSel.delete(id); });
+    const allVisibleOn = list.length > 0 && list.every(l => leadSel.has(l.id));
+    const n = leadSel.size;
+
+    const selBar = !leadSelecting ? '' :
+      '<div class="selbar">' +
+        '<button class="btn ghost sm" id="selAll">' + esc(allVisibleOn ? t('Clear all') : t('Select all')) + '</button>' +
+        '<button class="btn primary sm" id="selSend" ' + (n ? '' : 'disabled') + '>' + ic.send + ' ' + esc(t('Send')) + ' (' + n + ')</button>' +
+        '<button class="btn danger sm" id="selDel" ' + (n ? '' : 'disabled') + '>' + esc(t('Delete')) + ' (' + n + ')</button>' +
+      '</div>';
+
     const body =
       '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">' + chips + '</div>' +
-      (list.length ? list.map(leadRow).join('') :
-        '<div class="list-empty">'+ic.empty+'<p>'+esc(t('No leads here yet.'))+'</p><button class="btn primary sm" data-nav="#/scan" style="margin:0 auto">'+esc(t('Scan a card'))+'</button></div>');
-    shell(t('Leads'), isAdmin()?t('All company leads'):t('My leads'), body, '#/leads', { fab:true, bind(){
+      (list.length ? list.map(l => leadRow(l, leadSelecting ? leadSel.has(l.id) : null)).join('') :
+        '<div class="list-empty">'+ic.empty+'<p>'+esc(t('No leads here yet.'))+'</p><button class="btn primary sm" data-nav="#/scan" style="margin:0 auto">'+esc(t('Scan a card'))+'</button></div>') +
+      selBar;
+
+    const right = list.length || leadSelecting
+      ? '<button class="back" id="selToggle">' + esc(leadSelecting ? t('Done') : t('Select')) + '</button>' : '';
+
+    shell(t('Leads'), isAdmin()?t('All company leads'):t('My leads'), body, '#/leads', { fab:!leadSelecting, right: right, bind(){
       app.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => { leadFilter = b.getAttribute('data-filter'); leadsScreen(); });
-      app.querySelectorAll('[data-lead]').forEach(b => b.onclick = () => go('#/lead?id=' + b.getAttribute('data-lead')));
+      const tg = $('#selToggle'); if (tg) tg.onclick = () => { leadSelecting = !leadSelecting; leadSel.clear(); leadsScreen(); };
+      app.querySelectorAll('[data-lead]').forEach(b => b.onclick = () => {
+        const id = b.getAttribute('data-lead');
+        if (!leadSelecting) return go('#/lead?id=' + id);
+        leadSel.has(id) ? leadSel.delete(id) : leadSel.add(id);
+        leadsScreen();
+      });
+      const sa = $('#selAll'); if (sa) sa.onclick = () => {
+        if (allVisibleOn) list.forEach(l => leadSel.delete(l.id)); else list.forEach(l => leadSel.add(l.id));
+        leadsScreen();
+      };
+      const ss = $('#selSend'); if (ss) ss.onclick = async () => {
+        if (!leadSel.size) return;
+        ss.disabled = true; ss.innerHTML = '<div class="spinner"></div> ' + esc(t('Sending…'));
+        const r = await sendMany([...leadSel]);
+        leadSel.clear(); leadSelecting = false;
+        toast(sendManyMessage(r), r.fail ? 'err' : 'ok');
+        leadsScreen();
+      };
+      const sd = $('#selDel'); if (sd) sd.onclick = () => {
+        const ids = [...leadSel];
+        const sel = DB.leads.filter(l => leadSel.has(l.id));
+        const sentCount = sel.filter(l => l.status === 'Sent').length;
+        const notMine = isAdmin() ? 0 : sel.filter(l => l.createdBy !== user().id).length;
+        modal('<h3>' + esc(I18N.lang === 'it' ? 'Eliminare ' + ids.length + ' lead?' : 'Delete ' + ids.length + ' leads?') + '</h3>' +
+          '<p class="hint">' + esc(I18N.lang === 'it' ? 'Vengono eliminati da Bizca e non si possono recuperare.' : 'They are deleted from Bizca and cannot be recovered.') + '</p>' +
+          (sentCount ? '<p class="hint">' + esc(I18N.lang === 'it'
+              ? sentCount + ' sono già stati inviati: restano in Brevo e nel file Excel, vanno tolti da lì se serve.'
+              : sentCount + ' were already sent: they stay in Brevo and in the Excel file — remove them there if needed.') + '</p>' : '') +
+          (notMine ? '<p class="hint">' + esc(I18N.lang === 'it'
+              ? notMine + ' sono stati acquisiti da colleghi: solo loro o un amministratore possono eliminarli, verranno saltati.'
+              : notMine + ' were captured by colleagues: only they or an admin can delete them, so they will be skipped.') + '</p>' : '') +
+          '<button class="btn danger" id="delManyYes">' + esc(t('Delete')) + ' (' + ids.length + ')</button>' +
+          '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">' + esc(t('Cancel')) + '</button>');
+        setTimeout(() => { const y = document.getElementById('delManyYes'); if (y) y.onclick = async () => {
+          if (!S.online) { toast(t('Deleting needs a connection'), 'err'); return; }
+          y.disabled = true; y.innerHTML = '<div class="spinner"></div>';
+          const r = await deleteMany(ids);
+          closeModal(); leadSel.clear(); leadSelecting = false;
+          const it = I18N.lang === 'it';
+          const msg = [it ? r.deleted + ' eliminati' : r.deleted + ' deleted']
+            .concat(r.denied ? [it ? r.denied + ' non tuoi, saltati' : r.denied + ' not yours, skipped'] : [])
+            .concat(r.fail ? [it ? r.fail + ' non riusciti' : r.fail + ' failed'] : []).join(', ');
+          toast(msg, r.fail ? 'err' : 'ok');
+          leadsScreen();
+        }; }, 0);
+      };
     }});
   }
-  function leadRow(l) {
-    return '<div class="lead" data-lead="'+l.id+'"><div class="avatar">'+esc(initials((l.first||'?')+' '+(l.last||'')))+'</div>' +
+  // selected: null = normal row, true/false = selection mode
+  function leadRow(l, selected) {
+    const box = selected === null || selected === undefined ? ''
+      : '<div class="checkbox ' + (selected ? 'on' : '') + '">' + (selected ? ic.check : '') + '</div>';
+    return '<div class="lead' + (selected ? ' picked' : '') + '" data-lead="'+esc(l.id)+'">' + box + '<div class="avatar">'+esc(initials((l.first||'?')+' '+(l.last||'')))+'</div>' +
       '<div class="meta"><div class="name">'+esc((l.first+' '+l.last).trim()||t('Unnamed'))+'</div><div class="co">'+esc(l.company||'—')+' · '+esc(userName(l.ownerId)||t('unassigned'))+'</div>' +
-      '<div class="tags">'+statusPill(l.status)+(l.country?'<span class="pill gray">'+esc(tc(l.country))+'</span>':'')+(l.interesse?'<span class="pill blue">'+esc(l.interesse)+'</span>':'')+'</div></div>'+ic.chevR+'</div>';
+      '<div class="tags">'+statusPill(l.status)+(l.country?'<span class="pill gray">'+esc(tc(l.country))+'</span>':'')+(l.interesse?'<span class="pill blue">'+esc(l.interesse)+'</span>':'')+'</div></div>'+(selected === null || selected === undefined ? ic.chevR : '')+'</div>';
   }
 
   /* ---------- Batch ---------- */
@@ -1196,13 +1312,9 @@
         if(!batchSel.size){ toast(t('Select at least one lead'),'err'); return; }
         if(!S.online){ let q2=0; batchSel.forEach(id=>{ const l=DB.leads.find(x=>x.id===id); if(l&&requiredFilled(l)){ l.status='Ready'; l.queuedOffline=true; q2++; } }); batchSel.clear(); saveState(); toast(tp('n_leads_queued_offline', q2),'' ); batchScreen(); return; }
         ss.disabled=true; ss.innerHTML='<div class="spinner"></div> '+esc(t('Sending…'));
-        let sent=0, fail=0, skip=0;
-        const ids=Array.from(batchSel);
-        for(const id of ids){ const l=DB.leads.find(x=>x.id===id); if(!l){continue;} if(!requiredFilled(l)||(DB.requireConsent&&!l.consentAt)){ skip++; continue; } const ok=await deliverLead(l); ok?sent++:fail++; }
-        batchSel.clear(); saveState();
-        toast(I18N.lang === 'it'
-          ? (sent+' inviati'+(fail?', '+fail+' non riusciti':'')+(skip?', '+skip+' saltati (incompleti)':''))
-          : (sent+' sent'+(fail?', '+fail+' failed':'')+(skip?', '+skip+' skipped (incomplete)':'')), fail?'err':'ok'); batchScreen();
+        const r=await sendMany(Array.from(batchSel));
+        batchSel.clear();
+        toast(sendManyMessage(r), r.fail?'err':'ok'); batchScreen();
       };
     }});
   }

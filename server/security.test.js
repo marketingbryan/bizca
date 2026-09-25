@@ -35,6 +35,13 @@ function fakeDb() {
         if (ex.company_id !== p[1]) return one([]);            // WHERE leads.company_id = EXCLUDED.company_id
         Object.assign(ex, { owner_id:p[3], first_name:p[5], card_image:p[19] }); return one([{id:p[0]}]);
       }
+      if (/SELECT created_by FROM leads WHERE id=\$1 AND company_id=\$2/.test(sql))
+        return one(leads.filter(l => l.id === p[0] && l.company_id === p[1]).map(l => ({ created_by: l.created_by })));
+      if (/DELETE FROM leads WHERE id=\$1 AND company_id=\$2/.test(sql)) {
+        const i = leads.findIndex(l => l.id === p[0] && l.company_id === p[1]);
+        if (i >= 0) leads.splice(i, 1);
+        return { rowCount: i >= 0 ? 1 : 0, rows: [] };
+      }
       if (/SELECT settings FROM companies/.test(sql)) return one([{ settings: { ms: { tenantId:'t', clientId:'c', clientSecret:'s' } } }]);
       if (/FROM users WHERE lower\(email\)=lower\(\$1\)/.test(sql)) return one(users.filter(u => u.email === String(p[0]).toLowerCase()));
       return { rowCount: 0, rows: [] };
@@ -144,6 +151,35 @@ function loadServer(pool) {
     assert.strictEqual(pool.leads.find(l => l.id === 'nuovo4').card_image, null);
     await call('PUT /leads/nuovo5', { headers: { authorization: 'Bearer ' + tok }, body: { first: 'X', image: 'data:image/jpeg;base64,AAAA' } });
     assert.strictEqual(pool.leads.find(l => l.id === 'nuovo5').card_image, 'data:image/jpeg;base64,AAAA');
+  });
+
+  await t('un commerciale elimina i propri lead', async () => {
+    pool.leads.push({ id: 'mio', company_id: 'cA', created_by: 'uA2', owner_id: 'uA2' });
+    const tok = sign({ uid: 'uA2', cid: 'cA', role: 'seller', exp: Date.now() + 60000 });
+    const r = await call('DELETE /leads/mio', { headers: { authorization: 'Bearer ' + tok } });
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.body.deleted, 1);
+    assert.ok(!pool.leads.some(l => l.id === 'mio'));
+  });
+
+  await t('ma non quelli acquisiti da un collega', async () => {
+    pool.leads.push({ id: 'delcollega', company_id: 'cA', created_by: 'uA', owner_id: 'uA2' });
+    const tok = sign({ uid: 'uA2', cid: 'cA', role: 'seller', exp: Date.now() + 60000 });
+    const r = await call('DELETE /leads/delcollega', { headers: { authorization: 'Bearer ' + tok } });
+    assert.strictEqual(r.status, 403);
+    assert.ok(pool.leads.some(l => l.id === 'delcollega'), 'deve restare');
+  });
+
+  await t('un admin elimina qualunque lead della sua azienda', async () => {
+    const tok = sign({ uid: 'uA', cid: 'cA', role: 'admin', exp: Date.now() + 60000 });
+    const r = await call('DELETE /leads/delcollega', { headers: { authorization: 'Bearer ' + tok } });
+    assert.strictEqual(r.status, 200); assert.strictEqual(r.body.deleted, 1);
+  });
+
+  await t('nessuno elimina i lead di un\'altra azienda', async () => {
+    const tok = sign({ uid: 'uA', cid: 'cA', role: 'admin', exp: Date.now() + 60000 });
+    const r = await call('DELETE /leads/shared1', { headers: { authorization: 'Bearer ' + tok } });
+    assert.strictEqual(r.body.deleted, 0);
+    assert.ok(pool.leads.some(l => l.id === 'shared1'), 'il lead dell\'altra azienda deve restare');
   });
 
   console.log('\n' + pass + ' passati, ' + fail + ' falliti\n');

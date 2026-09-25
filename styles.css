@@ -164,3 +164,11 @@ select.input{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg 
 .pill svg{width:14px;height:14px;flex:none}
 .checkbox{width:22px;height:22px;border-radius:6px;border:2px solid var(--line);flex-shrink:0;display:grid;place-items:center}
 .checkbox.on{background:var(--indigo);border-color:var(--indigo)}
+.checkbox svg{width:14px;height:14px;color:#fff}
+.lead .checkbox{margin-right:2px}
+.lead.picked{border-color:var(--indigo);background:#F0F9FF}
+/* Actions for the selected leads: always reachable above the tab bar. */
+.selbar{position:sticky;bottom:72px;z-index:25;display:flex;gap:8px;padding:10px;margin-top:12px;
+  background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg)}
+.selbar .btn{flex:1;white-space:nowrap}
+.selbar .btn:disabled{opacity:.45}
