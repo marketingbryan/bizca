@@ -1,5 +1,5 @@
 /* Bizca service worker — offline-tolerant shell cache */
-const CACHE = 'bizca-v17';
+const CACHE = 'bizca-v18';
 const ASSETS = [
   './',
   './index.html',

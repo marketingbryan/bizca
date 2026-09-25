@@ -237,6 +237,24 @@ const admin = { session: { cid: 'c1', uid: 'u1', role: 'admin' } };
     assert.deepStrictEqual(pool.inserted[0], { lead: 'l1', dest: 'Excel', ok: true, msg: 'Row added to Leads.xlsx' });
   });
 
+  await t('a test row that lands switches sending on', async () => {
+    const g = fakeMs();
+    const pool = fakePool({ ms: { enabled: false, tenantId: 't', clientId: 'c', clientSecret: 's', driveId: 'd', itemId: 'i', tableName: 'LeadsTable' } });
+    const app = fakeApp(); ms.mount(app, deps(pool, g.fetch));
+    const r = await app.call('POST /ms/test', Object.assign({ body: { writeTest: true } }, admin));
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(pool.store.settings.ms.enabled, true);
+    assert.strictEqual(r.body.ms.enabled, true);
+  });
+
+  await t('a connection check alone does not switch sending on', async () => {
+    const g = fakeMs();
+    const pool = fakePool({ ms: { enabled: false, tenantId: 't', clientId: 'c', clientSecret: 's', driveId: 'd', itemId: 'i', tableName: 'LeadsTable' } });
+    const app = fakeApp(); ms.mount(app, deps(pool, g.fetch));
+    await app.call('POST /ms/test', Object.assign({ body: {} }, admin));
+    assert.strictEqual(pool.store.settings.ms.enabled, false);
+  });
+
   await t('the same lead is never written twice', async () => {
     const g = fakeMs();
     const pool = fakePool({ ms: { enabled: true, tenantId: 't', clientId: 'c', clientSecret: 's', driveId: 'd', itemId: 'i', tableName: 'T', fileName: 'Leads.xlsx' } });

@@ -185,11 +185,14 @@
   /* ---------- delivery (Brevo + Excel on SharePoint) ---------- */
   // Excel is written server-side: the Microsoft client secret never reaches the browser.
   async function pushToExcel(l) {
-    if (!(DB.ms && DB.ms.enabled)) return null;      // destination off → nothing to log
+    if (!DB.ms || !DB.ms.ready) return null;            // no workbook connected: nothing to do
+    // Connected but switched off: say so on the lead instead of skipping silently.
+    if (!DB.ms.enabled) return { ok: false, off: true, msg: 'Excel destination is switched off (Admin → Destinations)' };
     if (!getToken()) return { ok: false, msg: 'Not signed in' };
     try {
       const d = await api('POST', '/ms/append', { leadId: l.id });
-      if (d && d.skipped) return null;
+      if (d && d.skipped === 'already written') return { ok: true, msg: 'Already in ' + (DB.ms.fileName || 'the shared workbook') };
+      if (d && d.skipped) return { ok: false, off: true, msg: 'Excel skipped: ' + d.skipped };
       return { ok: true, msg: 'Row added to ' + (d.file || 'the shared workbook') };
     } catch (e) { return { ok: false, msg: e.message || 'Graph error' }; }
   }
@@ -222,7 +225,9 @@
     DB.syncLog.unshift({ leadId: l.id, dest: 'Brevo', ok: r.ok, ts: Date.now(), msg: r.ok ? (r.action === 'updated' ? 'Contact updated (dedupe by email)' : 'Contact created') : r.msg });
     if (r.ok) { l.status = 'Sent'; l.error = null; l.queuedOffline = false; }
     else { l.status = 'Error'; l.error = 'Brevo: ' + r.msg; }
-    saveLead(l);
+    // The server builds the Excel row from the database copy of the lead, so the
+    // save must have landed first — otherwise it reads a stale lead or none at all.
+    await saveLead(l);
     api('POST', '/sync-log', { leadId: l.id, dest: 'Brevo', ok: r.ok, msg: r.ok ? (r.action || 'sent') : r.msg }).catch(() => {});
 
     // Excel runs after the lead is saved, so the server has the row to copy.
@@ -231,9 +236,10 @@
     if (x) {
       DB.syncLog.unshift({ leadId: l.id, dest: 'Excel', ok: x.ok, ts: Date.now(), msg: x.msg });
       // Already in Brevo but not yet in the file: marked and retried later.
-      l.excelPending = !x.ok;
+      // A switched-off destination is a setting, not a failure: logged, not retried.
+      l.excelPending = !x.ok && !x.off;
       if (!x.ok && r.ok) l.error = 'Excel: ' + x.msg;
-      saveLead(l);
+      await saveLead(l);
     }
     return r.ok;
   }
@@ -255,7 +261,7 @@
     for (const l of DB.leads.filter(l => l.excelPending && l.status === 'Sent')) {
       const x = await pushToExcel(l);
       if (x && x.ok) { l.excelPending = false; if (l.error && /^Excel:/.test(l.error)) l.error = null; done++; saveLead(l); }
-      else if (x) break;
+      else break;                        // off, unreachable or failing: stop, try again later
     }
     if (done) saveState();
     return done;
@@ -1383,6 +1389,9 @@
       '<h4 style="margin:18px 0 8px;font-size:14px">3 · '+esc(t('Check and switch on'))+'</h4>' +
       '<div class="btnrow"><button class="btn soft sm" id="msTest">'+esc(t('Test connection'))+'</button><button class="btn ghost sm" id="msTestRow">'+esc(t('Write a test row'))+'</button></div>' +
       report +
+      (m.ready && !m.enabled ? '<div class="banner" style="margin-top:12px;background:#FEF3C7;border-color:#FDE68A;color:#92400E">'+ic.alert+'<div>'+esc(I18N.lang === 'it'
+          ? 'Il file è collegato ma l\'invio a Excel è spento: i lead inviati non vengono scritti. Accendi l\'interruttore qui sotto.'
+          : 'The workbook is connected but sending to Excel is off: sent leads are not written. Turn on the switch below.')+'</div></div>' : '') +
       '<div class="kv" style="margin-top:12px;border:none"><span class="k">'+esc(t('Send leads to Excel'))+'</span><div class="switch '+(m.enabled?'on':'')+'" id="msOn"></div></div>' +
       '</div>';
   }
@@ -1465,7 +1474,7 @@
              mapped + ' of ' + (d.headers || []).length + ' columns matched' +
              (unknown.length ? ' · not recognised, left blank: ' + esc(unknown.join(', ')) : '') +
              (d.wroteTestRow ? '<br>A test row was added — delete it when you are done.' : '')) };
-        toast(writeTest ? t('Test row written') : t('Connection OK'), 'ok');
+        toast(writeTest && DB.ms.enabled ? t('Test row written — sending to Excel is on') : (writeTest ? t('Test row written') : t('Connection OK')), 'ok');
       } catch (e) { msReport = { ok: false, html: esc(e.message) }; toast(e.message, 'err'); }
       adminDest();
     };

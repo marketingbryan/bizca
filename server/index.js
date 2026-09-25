@@ -23,7 +23,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-25-excel1';
+const BUILD = '2026-09-25-excel2';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
 
 const pool = new Pool({
@@ -278,7 +278,8 @@ app.get('/state', auth, wrap(async (req, res) => {
     company: { id: c.id, name: c.name, domain: c.domain, locale: c.locale || 'en', configured: true },
     settings: { autoSend: s.autoSend !== false, requireConsent: !!s.requireConsent, allowOverride: s.allowOverride !== false, brevoApiKey: s.brevoApiKey || '', fallbackOwner: s.fallbackOwner || null, newsletterListId: s.newsletterListId || null },
     // Microsoft/Excel config is admin-only, and never carries the client secret
-    ms: req.session.role === 'admin' ? ms.publicCfg(s) : { enabled: !!(s.ms && s.ms.enabled) },
+    ms: req.session.role === 'admin' ? ms.publicCfg(s)
+        : (pc => ({ enabled: pc.enabled, ready: pc.ready, fileName: pc.fileName }))(ms.publicCfg(s)),
     users: users.rows.map(outUser),
     events: events.rows.map(outEvent),
     picklists: {

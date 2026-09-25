@@ -383,6 +383,7 @@ window.I18N = (function () {
     'Saved': 'Salvato',
     'Connection OK': 'Connessione riuscita',
     'Test row written': 'Riga di prova scritta',
+    'Test row written — sending to Excel is on': 'Riga di prova scritta — invio a Excel attivato',
     'Tenant ID is required': 'Il Directory (tenant) ID è obbligatorio',
     'Credentials removed': 'Credenziali rimosse',
     'Paste the link to the Excel file': 'Incolla il link al file Excel',

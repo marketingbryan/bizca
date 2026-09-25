@@ -369,7 +369,10 @@ function mount(app, deps) {
         await appendRow(token, cfg, rowFor(headers, sample), fetchImpl);
         wrote = true;
       }
-      const s = await patchMs(cid, { lastOk: Date.now(), lastError: null });
+      // A test row that really landed proves the whole chain: from here on every
+      // sent lead is written, without a second switch to remember.
+      const s = await patchMs(cid, wrote ? { lastOk: Date.now(), lastError: null, enabled: true }
+                                          : { lastOk: Date.now(), lastError: null });
       res.json({ ok: true, file: cfg.fileName, tables, headers, mapped, unknown, wroteTestRow: wrote, ms: publicCfg(s) });
     } catch (e) {
       await patchMs(cid, { lastError: e.message || 'Test failed' }).catch(() => {});
