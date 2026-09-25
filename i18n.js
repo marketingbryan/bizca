@@ -110,6 +110,7 @@ window.I18N = (function () {
     'Activate your account': 'Attiva il tuo account',
     'Welcome to Bizca': 'Benvenuto in Bizca',
     'Activate and sign in': 'Attiva ed entra',
+    'or create a password': 'oppure crea una password',
     'Activating…': 'Attivazione…',
     'Account activated': 'Account attivato',
     'This invitation link is incomplete': 'Il link di invito è incompleto',

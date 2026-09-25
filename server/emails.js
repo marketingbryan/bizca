@@ -59,7 +59,7 @@ const T = {
       html:
         '<div style="' + WRAP + '">' +
         '<p>You have been added to the Bizca workspace of <b>' + esc(o.company) + '</b>.</p>' +
-        '<p>Set your password to get started — or simply sign in with Google using this address.</p>' +
+        '<p>Sign in with your Microsoft or Google work account using this address — or create a password.</p>' +
         '<p><a href="' + o.link + '" style="' + BTN + '">Activate my account</a></p>' +
         '<p style="' + MUTED + '">Bizca turns the business cards you collect at trade shows into qualified leads in your CRM.</p></div>'
     }),
@@ -68,7 +68,7 @@ const T = {
       html:
         '<div style="' + WRAP + '">' +
         '<p>Sei stato aggiunto allo spazio di lavoro Bizca di <b>' + esc(o.company) + '</b>.</p>' +
-        '<p>Imposta la tua password per iniziare, oppure accedi con Google usando questo indirizzo.</p>' +
+        '<p>Entra con il tuo account aziendale Microsoft o Google usando questo indirizzo, oppure crea una password.</p>' +
         '<p><a href="' + o.link + '" style="' + BTN + '">Attiva il mio account</a></p>' +
         '<p style="' + MUTED + '">Bizca trasforma i biglietti da visita raccolti in fiera in lead qualificati dentro al tuo CRM.</p></div>'
     })

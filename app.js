@@ -562,19 +562,24 @@
         '<div class="card" style="box-shadow:var(--shadow-lg)">' +
           '<h3>' + esc(t('Welcome to Bizca')) + '</h3>' +
           '<p class="hint">' + (I18N.lang === 'it'
-            ? 'Scegli una password per <b>' + esc(email) + '</b> ed entri subito.'
-            : 'Choose a password for <b>' + esc(email) + '</b> and you are in.') + '</p>' +
+            ? 'Attiva l\'account <b>' + esc(email) + '</b>: entra con il tuo account aziendale, oppure crea una password.'
+            : 'Activate <b>' + esc(email) + '</b>: sign in with your work account, or create a password.') + '</p>' +
+          '<button class="ms-btn" id="acMs">' + ic.ms + esc(t('Sign in with Microsoft')) + '</button>' +
+          '<div id="gBtn" style="display:flex;justify-content:center;min-height:44px;margin-top:10px"></div>' +
+          '<div class="divider">' + esc(t('or create a password')) + '</div>' +
           '<div class="field"><label>' + esc(t('Full name')) + '</label><input class="input" id="acName" placeholder="Mario Rossi" autocomplete="name"></div>' +
           '<div class="field"><label>' + esc(t('Password')) + '</label><input class="input" id="acPwd" type="password" placeholder="' + esc(t('At least 8 characters')) + '" autocomplete="new-password"></div>' +
           '<button class="btn primary" id="acGo">' + esc(t('Activate and sign in')) + '</button>' +
-          '<p class="hint" style="text-align:center;margin:12px 0 0">' + (I18N.lang === 'it'
-            ? 'Se preferisci, puoi anche accedere con Google usando questo stesso indirizzo.'
-            : 'You can also sign in with Google using this same address.') + '</p>' +
+          '<p class="hint" style="text-align:center;margin:12px 0 0">' + esc(I18N.lang === 'it'
+            ? 'Con Microsoft o Google usa lo stesso indirizzo dell\'invito.'
+            : 'With Microsoft or Google, use the same address you were invited with.') + '</p>' +
           '<button class="btn ghost" id="acLogin" style="margin-top:10px">' + esc(t('Go to sign in')) + '</button>' +
           langSwitchRow() +
         '</div>' +
       '</div>';
     $('#acLogin').onclick = () => go('#/login');
+    $('#acMs').onclick = () => startMicrosoft(email, $('#acMs'));
+    initGoogle(email);
     bindLangSwitch(() => activateScreen(email, token));
 
     const submit = async () => {
@@ -597,6 +602,20 @@
     };
     $('#acGo').onclick = submit;
     $('#acPwd').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  }
+
+  /* Sign in with Microsoft for a given address. If the company has not set up
+     Microsoft, the server says so and the message is shown — the button stays. */
+  async function startMicrosoft(email, btn) {
+    const label = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> ' + esc(t('Redirecting to Microsoft…')); }
+    try {
+      const d = await api('POST', '/auth/microsoft/start', { email });
+      location.href = d.url;                   // leaves the app; Microsoft sends us back
+    } catch (e) {
+      toast(e.message, 'err');
+      if (btn) { btn.disabled = false; btn.innerHTML = label; }
+    }
   }
 
   /* ---------- Login ---------- */
@@ -637,22 +656,14 @@
         toast(e.message, 'err'); reset();
       }
     };
-    $('#sso').onclick = async () => {
+    $('#sso').onclick = () => {
       const email = ($('#email').value || '').trim().toLowerCase();
       if (!email) {
         toast(t('Type your work email first, then Microsoft'), 'err');
         const f = $('#email'); if (f) f.focus();
         return;
       }
-      const btn = $('#sso'); btn.disabled = true; const label = btn.innerHTML;
-      btn.innerHTML = '<div class="spinner"></div> ' + esc(t('Redirecting to Microsoft…'));
-      try {
-        const d = await api('POST', '/auth/microsoft/start', { email });
-        location.href = d.url;                 // leaves the app; Microsoft sends us back
-      } catch (e) {
-        toast(e.message, 'err');
-        btn.disabled = false; btn.innerHTML = label;
-      }
+      startMicrosoft(email, $('#sso'));
     };
     $('#login').onclick = signInEmail;
     $('#pwd').addEventListener('keydown', e => { if (e.key === 'Enter') signInEmail(); });
@@ -662,7 +673,7 @@
 
   // Google Identity Services — the ID token is verified server-side,
   // and only users already invited by the admin are allowed in.
-  async function initGoogle() {
+  async function initGoogle(hint) {
     const host = document.getElementById('gBtn');
     if (!host) return;
     let clientId = '';
@@ -674,7 +685,7 @@
     if (!clientId) { host.innerHTML = '<p class="hint" style="margin:0">' + esc(t('Google sign-in not configured yet.')) + '</p>'; return; }
     const start = () => {
       if (!window.google || !google.accounts || !google.accounts.id) return;
-      google.accounts.id.initialize({ client_id: clientId, callback: onGoogleCredential });
+      google.accounts.id.initialize(Object.assign({ client_id: clientId, callback: onGoogleCredential }, hint ? { login_hint: hint } : {}));
       google.accounts.id.renderButton(host, { theme: 'outline', size: 'large', width: 320, text: 'signin_with' });
     };
     if (window.google && window.google.accounts) { start(); return; }

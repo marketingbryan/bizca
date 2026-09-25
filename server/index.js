@@ -25,7 +25,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-25-audit1';
+const BUILD = '2026-09-25-invite2';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
 
 const pool = new Pool({
