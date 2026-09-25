@@ -87,7 +87,11 @@
   const activeEvent = () => DB.events.find(e => e.id === S.activeEventId) || DB.events[0];
   // What this capture session is: a trade show, or a one-to-one meeting.
   const captureType = () => (S.captureType === 'meeting' ? 'meeting' : 'event');
-  const sourceLabel = () => captureType() === 'meeting' ? t('Personal meeting') : t('Event');
+  /* Stored in English, shown translated — same rule as statuses and countries,
+     so the shared Excel file and Brevo stay readable to everyone. */
+  const sourceValue = () => captureType() === 'meeting' ? 'Personal meeting' : 'Event';
+  const sourceLabel = () => t(sourceValue());
+  const sourceDisplay = v => (v === 'Personal meeting' || v === 'Event') ? t(v) : (v || '');
   /* Where a lead lands in Brevo:
        event   → the list configured for that event, plus the newsletter list if ticked
        meeting → nothing, unless the newsletter is ticked — then only that list
@@ -832,7 +836,7 @@
       id: 'l' + Date.now(),
       first: d.first || '', last: d.last || '', company: d.company || '', role: d.role || '',
       email: d.email || '', phone: d.phone || '', website: d.website || '', address: d.address || '',
-      provenienza: sourceLabel(), country: d.country || preset.country || '', interesse: preset.interesse || '',
+      provenienza: sourceValue(), country: d.country || preset.country || '', interesse: preset.interesse || '',
       eventId: captureType() === 'event' && ev ? ev.id : null,
       captureType: captureType(), brevoListId: sessionListId(), newsletter: false,
       ownerId: user().id, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
@@ -870,11 +874,20 @@
       '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(t('Contact'))+'</h3><span class="pill indigo">'+ic.bolt+' '+esc(t('AI extracted'))+'</span></div><p class="hint">'+esc(t('Confirm or fix the fields below.'))+'</p>' + (l.image ? '<img src="'+l.image+'" alt="business card" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;margin-bottom:12px;border:1px solid var(--line)">' : '') + contactFields + '</div>' +
 
       '<div class="card"><h3>'+esc(t('Qualification'))+'</h3><p class="hint">'+esc(t('Required before sending. Managed as closed lists by admin.'))+'</p>' +
-        '<div class="kv"><span class="k">'+esc(t('Source'))+'</span><span class="v">'+esc(l.provenienza || '—')+'</span></div>' +
+        '<div class="kv"><span class="k">'+esc(t('Source'))+'</span><span class="v">'+esc(sourceDisplay(l.provenienza) || '—')+'</span></div>' +
         '<p class="hint" style="margin:6px 0 12px">'+esc(I18N.lang === 'it' ? 'Impostata quando hai scelto evento o meeting.' : 'Set when you chose the event or meeting.')+'</p>' +
         '<div class="field"><label>'+esc(t('Country'))+' <span class="req">*</span></label><select class="input" data-q="country" '+(readOnly?'disabled':'')+'>'+ctryOpts+'</select></div>' +
         '<div class="field" style="margin-bottom:0"><label>'+esc(t('Segment'))+' <span class="req">*</span></label>' + segChips(l, readOnly) + '</div>' +
       '</div>' +
+
+      '<div class="card"><h3>'+esc(t('Assign to'))+'</h3>' +
+        '<p class="hint">'+esc(I18N.lang === 'it'
+          ? 'Di norma il lead resta tuo. Cambialo se deve seguirlo un collega.'
+          : 'By default the lead stays yours. Change it if a colleague should follow up.')+'</p>' +
+        '<select class="input" data-owner '+(readOnly?'disabled':'')+'>' +
+          DB.users.filter(u=>u.status==='active').map(u =>
+            '<option value="'+u.id+'" '+(u.id===l.ownerId?'selected':'')+'>'+esc(u.name||u.email)+(u.id===user().id?' ('+esc(I18N.lang === 'it' ? 'tu' : 'you')+')':'')+'</option>').join('') +
+        '</select></div>' +
 
       consentCard(l, readOnly) +
 
@@ -887,6 +900,8 @@
       // live updates
       app.querySelectorAll('[data-f]').forEach(inp => inp.oninput = () => { l[inp.getAttribute('data-f')] = inp.value; });
       app.querySelectorAll('[data-q]').forEach(sel => sel.onchange = () => { l[sel.getAttribute('data-q')] = sel.value; });
+      const ow = app.querySelector('[data-owner]');
+      if (ow) ow.onchange = () => { l.ownerId = ow.value; saveState(); saveLead(l); toast(t('Assigned to') + ' ' + userName(l.ownerId), 'ok'); };
       bindSegChips(l, () => leadScreen(l.id));
       const nk = $('#newsOk'); if (nk) nk.onchange = () => { l.newsletter = nk.checked; saveState(); saveLead(l); };
       const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; saveState(); saveLead(l); toast(t('Draft saved'),'ok'); go('#/leads'); };
@@ -1011,8 +1026,7 @@
     return '<div class="card"><h3>'+esc(t('Delivery'))+'</h3>' + (logs.length ? logs.map(s =>
       '<div class="kv"><span class="k">'+esc(s.dest)+'</span><span class="v">'+(s.ok?'<span class="pill green">'+ic.check+' '+esc(s.msg)+'</span>':'<span class="pill red">'+esc(s.msg)+'</span>')+'</span></div>').join('')
       : '<p class="hint">'+esc(t('No delivery records.'))+'</p>') +
-      '<div class="kv"><span class="k">'+esc(t('Owner'))+'</span><span class="v">'+esc(userName(l.ownerId))+'</span></div>' +
-      '<div class="kv"><span class="k">'+esc(t('Captured by'))+'</span><span class="v">'+esc(userName(l.createdBy))+'</span></div></div>';
+      '<div class="kv"><span class="k">'+esc(t('Assigned to'))+'</span><span class="v">'+esc(userName(l.ownerId))+'</span></div></div>';
   }
 
   /* ---------- Leads list ---------- */
@@ -1057,7 +1071,7 @@
     shell(t('Batch queue'), tp('n_cards', q.length), body, null, { back:'#/home', bind(){
       app.querySelectorAll('[data-sel]').forEach(c => c.onclick = () => { const id=c.getAttribute('data-sel'); batchSel.has(id)?batchSel.delete(id):batchSel.add(id); batchScreen(); });
       app.querySelectorAll('[data-open]').forEach(m => m.onclick = () => go('#/lead?id=' + m.getAttribute('data-open')));
-      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast(t('No active event'),'err'); return; } q.forEach(l=>{ if(!l.provenienza)l.provenienza=sourceLabel(); if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(!l.ownerId)l.ownerId=user().id; if(requiredFilled(l))l.status='Ready'; }); q.forEach(saveLead); toast(t('Preset applied to queue'),'ok'); batchScreen(); };
+      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast(t('No active event'),'err'); return; } q.forEach(l=>{ if(!l.provenienza)l.provenienza=sourceValue(); if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(!l.ownerId)l.ownerId=user().id; if(requiredFilled(l))l.status='Ready'; }); q.forEach(saveLead); toast(t('Preset applied to queue'),'ok'); batchScreen(); };
       const ss=$('#sendSel'); if(ss) ss.onclick = async () => {
         if(!batchSel.size){ toast(t('Select at least one lead'),'err'); return; }
         if(!S.online){ let q2=0; batchSel.forEach(id=>{ const l=DB.leads.find(x=>x.id===id); if(l&&requiredFilled(l)){ l.status='Ready'; l.queuedOffline=true; q2++; } }); batchSel.clear(); saveState(); toast(tp('n_leads_queued_offline', q2),'' ); batchScreen(); return; }
@@ -1139,6 +1153,7 @@
           '<div class="switch '+(u.status==='active'?'on':'')+'" data-u="'+u.id+'" title="'+esc(t('Enable / disable'))+'"></div>' +
           (u.id!==me.id?'<button class="pill gray" data-role="'+u.id+'" style="border:none;cursor:pointer">'+esc(u.role==='admin'?t('make seller'):t('make admin'))+'</button>':'') +
           (u.activated===false?'<button class="pill blue" data-resend="'+u.id+'" style="border:none;cursor:pointer">'+esc(t('resend invitation'))+'</button>':'') +
+          (u.id!==me.id?'<button class="pill red" data-delu="'+u.id+'" style="border:none;cursor:pointer">'+esc(t('remove'))+'</button>':'') +
         '</div></div>').join('') +
       '<button class="btn primary" id="invite" style="margin-top:8px">'+ic.plus+' '+esc(t('Add user'))+'</button>';
     shell(t('Team & access'), tp('n_users', DB.users.length), body, null, { back:'#/admin', bind(){
@@ -1160,6 +1175,35 @@
           toast(r.emailSent === false ? ((I18N.lang === 'it' ? 'Invio non riuscito: ' : 'Could not send: ') + (r.emailError || t('email not configured'))) : t('Invitation sent again'), r.emailSent === false ? 'err' : 'ok');
         } catch (e) { toast(e.message, 'err'); }
         b.disabled = false;
+      });
+      app.querySelectorAll('[data-delu]').forEach(b => b.onclick = () => {
+        const u = DB.users.find(x => x.id === b.getAttribute('data-delu'));
+        if (!u) return;
+        const owned = DB.leads.filter(l => l.ownerId === u.id).length;
+        modal('<h3>' + esc(I18N.lang === 'it' ? 'Rimuovere ' + (u.name || u.email) + '?' : 'Remove ' + (u.name || u.email) + '?') + '</h3>' +
+          '<p class="hint">' + esc(owned
+            ? (I18N.lang === 'it'
+                ? 'Non potrà più accedere. I suoi ' + owned + ' lead non vengono cancellati: passano a te.'
+                : 'They will lose access. Their ' + owned + ' leads are not deleted: they move to you.')
+            : (I18N.lang === 'it'
+                ? 'Non potrà più accedere. Non ha lead a suo nome.'
+                : 'They will lose access. No leads are assigned to them.')) + '</p>' +
+          '<p class="hint">' + esc(I18N.lang === 'it'
+            ? 'Se ti serve solo sospenderlo, usa invece l\'interruttore: mantiene l\'account e lo riattivi quando vuoi.'
+            : 'To suspend instead, use the switch: it keeps the account so you can turn it back on.') + '</p>' +
+          '<button class="btn danger" id="delUYes">' + esc(t('Remove user')) + '</button>' +
+          '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">' + esc(t('Cancel')) + '</button>');
+        setTimeout(() => { const y = document.getElementById('delUYes'); if (y) y.onclick = async () => {
+          y.disabled = true; y.innerHTML = '<div class="spinner"></div>';
+          try {
+            const r = await api('DELETE', '/users/' + u.id);
+            DB.users = DB.users.filter(x => x.id !== u.id);
+            DB.leads.forEach(l => { if (l.ownerId === u.id) l.ownerId = me.id; });
+            saveState(); closeModal();
+            toast(r.leadsReassigned ? tp('n_leads_moved_to_you', r.leadsReassigned) : t('User removed'), 'ok');
+            adminTeam();
+          } catch (e) { toast(e.message, 'err'); y.disabled = false; y.textContent = t('Remove user'); }
+        }; }, 0);
       });
       $('#invite').onclick = () => {
         modal('<h3>'+esc(t('Add user'))+'</h3><p class="hint">'+esc(t('They can then sign in with Google or their work email.'))+'</p>' +
@@ -1225,15 +1269,16 @@
   // Same column order as the Excel table, so the two exports stay comparable.
   function exportCsv() {
     const head = I18N.lang === 'it'
-      ? ['Data acquisizione','Evento','Nome','Cognome','Azienda','Ruolo','Email','Telefono','Sito web','Indirizzo','Provenienza','Country','Segmento','Assegnato a','Caricato da','Stato','Consenso']
-      : ['Date','Event','First name','Last name','Company','Role','Email','Phone','Website','Address','Source','Country','Segment','Assigned to','Captured by','Status','Consent'];
+      ? ['Data acquisizione','Evento','Nome','Cognome','Azienda','Ruolo','Email','Telefono','Sito web','Indirizzo','Provenienza','Country','Segmento','Assegnato a','Stato','Consenso','Newsletter']
+      : ['Captured at','Event','First name','Last name','Company','Role','Email','Phone','Website','Address','Source','Country','Segment','Assigned to','Status','Consent','Newsletter'];
     const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
     const evName = id => (DB.events.find(e => e.id === id) || {}).name || '';
     const rows = DB.leads.map(l => [
       new Date(l.ts).toISOString().slice(0, 16).replace('T', ' '), evName(l.eventId),
       l.first, l.last, l.company, l.role, l.email, l.phone, l.website, l.address,
-      l.provenienza, l.country, l.interesse, userName(l.ownerId), userName(l.createdBy),
-      statusLabel(l.status), l.consentAt ? new Date(l.consentAt).toISOString().slice(0, 10) : ''
+      sourceDisplay(l.provenienza), l.country, l.interesse, userName(l.ownerId),
+      statusLabel(l.status), l.consentAt ? new Date(l.consentAt).toISOString().slice(0, 10) : '',
+      l.newsletter ? 'x' : ''
     ].map(q).join(','));
     const csv = '﻿' + [head.map(q).join(',')].concat(rows).join('\r\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));

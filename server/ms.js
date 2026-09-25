@@ -237,7 +237,9 @@ async function leadValues(pool, cid, lead) {
     country: lead.country || '',
     segment: lead.segment || '',
     owner: who(own),
-    createdby: who(cre),
+    // One owner only: files that still carry a "Captured by" column get the
+    // same name, so nothing is left blank when a customer keeps the old sheet.
+    createdby: who(own) || who(cre),
     status: lead.status || '',
     consent: isoDate(lead.consent_at),
     newsletter: lead.newsletter ? 'x' : '',

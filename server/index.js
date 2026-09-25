@@ -23,7 +23,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-25-capture2';
+const BUILD = '2026-09-25-owner1';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
 
 const pool = new Pool({
@@ -326,6 +326,32 @@ app.post('/users', auth, requireAdmin, wrap(async (req, res) => {
   await sendEmail(email, msg.subject, msg.html);
   const r = await pool.query('SELECT * FROM users WHERE id=$1', [uid]);
   res.json({ ok: true, user: outUser(r.rows[0]) });
+}));
+
+/* Remove a user. Their leads are not deleted: ownership moves to the admin
+   doing the removal, so nothing captured at a trade show is ever lost. */
+app.delete('/users/:uid', auth, requireAdmin, wrap(async (req, res) => {
+  const target = await pool.query('SELECT * FROM users WHERE id=$1 AND company_id=$2', [req.params.uid, req.session.cid]);
+  if (!target.rowCount) return res.status(404).json({ error: 'User not found' });
+  if (req.params.uid === req.session.uid) return res.status(400).json({ error: 'You cannot remove your own account' });
+
+  const admins = await pool.query("SELECT count(*)::int AS n FROM users WHERE company_id=$1 AND role='admin' AND status='active'", [req.session.cid]);
+  if (admins.rows[0].n <= 1 && target.rows[0].role === 'admin' && target.rows[0].status === 'active') {
+    return res.status(400).json({ error: 'Keep at least one active admin' });
+  }
+
+  const client = await pool.connect();
+  let moved = 0;
+  try {
+    await client.query('BEGIN');
+    const r = await client.query('UPDATE leads SET owner_id=$1, updated_at=now() WHERE company_id=$2 AND owner_id=$3',
+      [req.session.uid, req.session.cid, req.params.uid]);
+    moved = r.rowCount || 0;
+    await client.query('DELETE FROM users WHERE id=$1 AND company_id=$2', [req.params.uid, req.session.cid]);
+    await client.query('COMMIT');
+  } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+
+  res.json({ ok: true, leadsReassigned: moved });
 }));
 
 // Send the invitation again — the previous link stops working.

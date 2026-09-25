@@ -11,10 +11,12 @@ const t = async (name, fn) => { try { await fn(); pass++; console.log('  ok   ' 
 /* ---- a tiny in-memory Postgres that understands only the queries we use ---- */
 function fakeDb() {
   const users = [];
+  const leads = [];
   const companies = [{ id: 'c1', name: 'VID', locale: 'it', settings: {} }];
   const sent = [];
   const pool = {
-    users, companies, sent,
+    users, companies, sent, leads,
+    connect: async () => ({ query: (...a) => pool.query(...a), release() {} }),
     query: async (sql, p = []) => {
       const one = rows => ({ rowCount: rows.length, rows });
       if (/SELECT id,company_id,role,status FROM users WHERE id=\$1/.test(sql))
@@ -52,6 +54,17 @@ function fakeDb() {
         if (p[0]) u.role = p[0]; if (p[1]) u.status = p[1]; if (p[2]) u.name = p[2];
         return { rowCount: 1 };
       }
+      if (/UPDATE leads SET owner_id=\$1/.test(sql)) {
+        const hit = leads.filter(l => l.company_id === p[1] && l.owner_id === p[2]);
+        hit.forEach(l => { l.owner_id = p[0]; });
+        return { rowCount: hit.length };
+      }
+      if (/DELETE FROM users WHERE id=\$1/.test(sql)) {
+        const i = users.findIndex(u => u.id === p[0] && u.company_id === p[1]);
+        if (i >= 0) users.splice(i, 1);
+        return { rowCount: i >= 0 ? 1 : 0 };
+      }
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/.test(sql)) return { rowCount: 0, rows: [] };
       return { rowCount: 0, rows: [] };
     }
   };
@@ -249,6 +262,33 @@ function loadServer(pool) {
     const r = await srv.call('GET /state', { headers: { authorization: 'Bearer ' + tok } });
     assert.strictEqual(r.status, 403, JSON.stringify(r.body));
     laura.status = 'active';
+  });
+
+  await t('rimuovendo un utente i suoi lead passano a chi lo rimuove', async () => {
+    const laura = pool.users.find(u => u.email === 'laura@vid.it');
+    pool.leads.push({ id: 'ld1', company_id: 'c1', owner_id: laura.id });
+    pool.leads.push({ id: 'ld2', company_id: 'c1', owner_id: laura.id });
+    pool.leads.push({ id: 'ld3', company_id: 'c1', owner_id: 'u1' });
+    const r = await srv.call('DELETE /users/' + laura.id, Object.assign({ params: { uid: laura.id } }, adminAuth));
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.leadsReassigned, 2);
+    assert.ok(!pool.users.find(u => u.id === laura.id), 'utente non rimosso');
+    assert.strictEqual(pool.leads.filter(l => l.owner_id === 'u1').length, 3, 'i lead devono essere tutti dell\'admin');
+  });
+
+  await t('non si può rimuovere se stessi', async () => {
+    const r = await srv.call('DELETE /users/u1', Object.assign({ params: { uid: 'u1' } }, adminAuth));
+    assert.strictEqual(r.status, 400);
+    assert.ok(pool.users.find(u => u.id === 'u1'), 'l\'admin deve restare');
+  });
+
+  await t('non si può rimuovere l\'ultimo amministratore attivo', async () => {
+    pool.users.push({ id: 'u7', company_id: 'c1', name: 'Altro', email: 'altro@vid.it', role: 'admin',
+      status: 'active', email_verified: true, verify_token: null, password_hash: 'x:y', locale: 'it' });
+    // ora ci sono due admin: rimuoverne uno deve passare
+    const ok = await srv.call('DELETE /users/u7', Object.assign({ params: { uid: 'u7' } }, adminAuth));
+    assert.strictEqual(ok.status, 200, JSON.stringify(ok.body));
+    // con un solo admin rimasto, il tentativo su se stessi è già bloccato sopra
   });
 
   console.log('\n' + pass + ' passati, ' + fail + ' falliti\n');
