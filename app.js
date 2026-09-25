@@ -142,8 +142,13 @@
   const LANG_KEY = 'bizca-lang';
   const readUserLang = () => { try { return I18N.normalise(localStorage.getItem(LANG_KEY)); } catch (e) { return ''; } };
   function applyLang() {
-    I18N.setFallback(I18N.normalise(DB.company && DB.company.locale) || 'en');
-    I18N.setLang(readUserLang() || I18N.normalise(DB.company && DB.company.locale) || 'en');
+    // The empty starter state carries a placeholder locale: only a real workspace counts.
+    const coLang = DB.company && DB.company.configured ? I18N.normalise(DB.company.locale) : '';
+    I18N.setFallback(coLang || 'en');
+    // Before signing in there is no picker: follow the choice already made on this
+    // device, then the workspace default, then the phone's own language.
+    const deviceLang = I18N.normalise((navigator.languages && navigator.languages[0]) || navigator.language);
+    I18N.setLang(readUserLang() || coLang || deviceLang || 'en');
     document.documentElement.lang = I18N.lang;
   }
   function setUserLang(code) {
@@ -424,12 +429,10 @@
           '<p class="hint" style="text-align:center">' + esc(t('Sign in if your company already uses Bizca, or create a new workspace.')) + '</p>' +
           '<button class="btn primary" id="wSignIn">' + esc(t('Sign in')) + '</button>' +
           '<button class="btn ghost" id="wRegister" style="margin-top:10px">' + ic.plus + ' ' + esc(t('Register your company')) + '</button>' +
-          langSwitchRow() +
         '</div>' +
       '</div>';
     $('#wSignIn').onclick = () => go('#/login');
     $('#wRegister').onclick = () => go('#/setup');
-    bindLangSwitch(() => welcomeScreen());
   }
 
   /* Admin → language: the workspace default, plus this user's own choice. */
@@ -461,7 +464,7 @@
     bindLangSwitch(() => adminScreen());
   }
 
-  /* Language picker shown on the screens you see before signing in. */
+  /* Language picker: in Admin → Language and in the account menu only. */
   function langSwitchRow() {
     return '<div style="display:flex;justify-content:center;gap:6px;margin-top:16px">' +
       I18N.LANGS.map(l => '<button class="pill ' + (I18N.lang === l.code ? 'indigo' : 'gray') + '" data-lang="' + l.code + '" style="border:none;cursor:pointer">' + esc(l.label) + '</button>').join('') +
@@ -496,11 +499,9 @@
           '</label>' +
           '<button class="btn primary" id="doSetup" style="margin-top:14px">' + esc(t('Create workspace')) + '</button>' +
           (DB.company.configured ? '' : '<button class="btn ghost" id="backWelcome" style="margin-top:10px">' + esc(t('Back')) + '</button>') +
-          langSwitchRow() +
         '</div>' +
       '</div>';
     const bw = $('#backWelcome'); if (bw) bw.onclick = () => go('#/welcome');
-    bindLangSwitch(() => setupScreen());
     $('#doSetup').onclick = async () => {
       const name = ($('#coName').value || '').trim();
       const domain = ($('#coDomain').value || '').trim().toLowerCase().replace(/^@/, '');
@@ -574,13 +575,11 @@
             ? 'Con Microsoft o Google usa lo stesso indirizzo dell\'invito.'
             : 'With Microsoft or Google, use the same address you were invited with.') + '</p>' +
           '<button class="btn ghost" id="acLogin" style="margin-top:10px">' + esc(t('Go to sign in')) + '</button>' +
-          langSwitchRow() +
         '</div>' +
       '</div>';
     $('#acLogin').onclick = () => go('#/login');
     $('#acMs').onclick = () => startMicrosoft(email, $('#acMs'));
     initGoogle(email);
-    bindLangSwitch(() => activateScreen(email, token));
 
     const submit = async () => {
       const pwd = $('#acPwd').value || '';
@@ -636,7 +635,6 @@
                 ? 'Su questo dispositivo non c\'è ancora uno spazio di lavoro. Se la tua azienda usa già Bizca, accedi con Google usando l\'account di lavoro; altrimenti registra la tua azienda.'
                 : 'No workspace on this device yet. If your company already uses Bizca, sign in with Google using your work account — otherwise register your company.') + '</div></div>' +
               '<button class="btn ghost" id="backWelcome" style="margin-top:10px">' + esc(t('Back')) + '</button>') +
-          langSwitchRow() +
         '</div>' +
       '</div>';
     const bw = $('#backWelcome'); if (bw) bw.onclick = () => go('#/welcome');
@@ -667,7 +665,6 @@
     };
     $('#login').onclick = signInEmail;
     $('#pwd').addEventListener('keydown', e => { if (e.key === 'Enter') signInEmail(); });
-    bindLangSwitch(() => loginScreen());
     initGoogle();
   }
 
