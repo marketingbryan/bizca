@@ -23,7 +23,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-25-owner1';
+const BUILD = '2026-09-25-excel1';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
 
 const pool = new Pool({
@@ -255,7 +255,7 @@ app.post('/auth/set-password', wrap(async (req, res) => {
 
 app.get('/state', auth, wrap(async (req, res) => {
   const cid = req.session.cid;
-  const [co, users, events, picks, rules, leads, logs] = await Promise.all([
+  const [co, users, events, picks, rules, leads, logs, excelMissing] = await Promise.all([
     pool.query('SELECT * FROM companies WHERE id=$1', [cid]),
     pool.query('SELECT * FROM users WHERE company_id=$1 ORDER BY created_at', [cid]),
     pool.query('SELECT * FROM events WHERE company_id=$1 ORDER BY created_at', [cid]),
@@ -264,7 +264,12 @@ app.get('/state', auth, wrap(async (req, res) => {
     req.session.role === 'admin'
       ? pool.query('SELECT * FROM leads WHERE company_id=$1 ORDER BY captured_at DESC LIMIT 2000', [cid])
       : pool.query('SELECT * FROM leads WHERE company_id=$1 AND (created_by=$2 OR owner_id=$2) ORDER BY captured_at DESC LIMIT 2000', [cid, req.session.uid]),
-    pool.query('SELECT * FROM sync_log WHERE company_id=$1 ORDER BY ts DESC LIMIT 200', [cid])
+    pool.query('SELECT * FROM sync_log WHERE company_id=$1 ORDER BY ts DESC LIMIT 200', [cid]),
+    // Sent leads whose Excel row failed and never succeeded since: the app retries them.
+    pool.query(`SELECT l.id FROM leads l
+                 WHERE l.company_id=$1 AND l.status='Sent'
+                   AND EXISTS (SELECT 1 FROM sync_log s WHERE s.company_id=l.company_id AND s.lead_id=l.id AND s.dest='Excel' AND NOT s.ok)
+                   AND NOT EXISTS (SELECT 1 FROM sync_log s WHERE s.company_id=l.company_id AND s.lead_id=l.id AND s.dest='Excel' AND s.ok)`, [cid])
   ]);
   if (!co.rowCount) return res.status(404).json({ error: 'Workspace not found' });
   const c = co.rows[0];
@@ -281,7 +286,8 @@ app.get('/state', auth, wrap(async (req, res) => {
       interesse: picks.rows.filter(p => p.kind === 'segment').map(p => ({ id: p.id, value: p.value, active: p.active }))
     },
     rules: rules.rows.map(outRule),
-    leads: leads.rows.map(outLead),
+    leads: (() => { const miss = new Set(excelMissing.rows.map(r => r.id));
+      return leads.rows.map(r => Object.assign(outLead(r), { excelPending: miss.has(r.id) })); })(),
     syncLog: logs.rows.map(l => ({ leadId: l.lead_id, dest: l.dest, ok: l.ok, msg: l.msg, ts: new Date(l.ts).getTime() })),
     me: { id: req.session.uid, role: req.session.role, locale: (users.rows.find(u => u.id === req.session.uid) || {}).locale || null }
   });

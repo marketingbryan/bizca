@@ -69,7 +69,9 @@ function fakePool(settings) {
       if (/FROM events/.test(sql)) return { rowCount: 1, rows: [rows.event] };
       if (/FROM users/.test(sql)) return { rowCount: 1, rows: [params[0] === 'u2' ? rows.owner : rows.creator] };
       if (/FROM leads/.test(sql)) return params[0] === 'l1' ? { rowCount: 1, rows: [rows.lead] } : { rowCount: 0, rows: [] };
-      if (/INSERT INTO sync_log/.test(sql)) { inserted.push({ dest: params[2], ok: params[3], msg: params[4] }); return { rowCount: 1 }; }
+      if (/FROM sync_log WHERE company_id=\$1 AND lead_id=\$2 AND dest='Excel' AND ok=true/.test(sql))
+        return { rowCount: inserted.filter(x => x.lead === params[1] && x.dest === 'Excel' && x.ok).length ? 1 : 0, rows: [] };
+      if (/INSERT INTO sync_log/.test(sql)) { inserted.push({ lead: params[1], dest: params[2], ok: params[3], msg: params[4] }); return { rowCount: 1 }; }
       return { rowCount: 0, rows: [] };
     }
   };
@@ -232,7 +234,33 @@ const admin = { session: { cid: 'c1', uid: 'u1', role: 'admin' } };
     assert.strictEqual(values[6], 'Germany');
     assert.strictEqual(values[8], 'Laura Bianchi');   // assigned owner, not the capturer
     assert.strictEqual(values[9], '');                 // unknown column left alone
-    assert.deepStrictEqual(pool.inserted[0], { dest: 'Excel', ok: true, msg: 'Row added to Leads.xlsx' });
+    assert.deepStrictEqual(pool.inserted[0], { lead: 'l1', dest: 'Excel', ok: true, msg: 'Row added to Leads.xlsx' });
+  });
+
+  await t('the same lead is never written twice', async () => {
+    const g = fakeMs();
+    const pool = fakePool({ ms: { enabled: true, tenantId: 't', clientId: 'c', clientSecret: 's', driveId: 'd', itemId: 'i', tableName: 'T', fileName: 'Leads.xlsx' } });
+    const app = fakeApp(); ms.mount(app, deps(pool, g.fetch));
+    const first = await app.call('POST /ms/append', Object.assign({ body: { leadId: 'l1' } }, admin));
+    const again = await app.call('POST /ms/append', Object.assign({ body: { leadId: 'l1' } }, admin));
+    assert.strictEqual(first.status, 200); assert.strictEqual(again.status, 200);
+    assert.strictEqual(again.body.skipped, 'already written');
+    assert.strictEqual(g.calls.filter(c => /rows\/add/.test(c.url)).length, 1, 'one row only');
+  });
+
+  await t('a failed write can be retried and then lands once', async () => {
+    const bad = fakeMs({ appendDenied: true });
+    const pool = fakePool({ ms: { enabled: true, tenantId: 't', clientId: 'c', clientSecret: 's', driveId: 'd', itemId: 'i', tableName: 'T' } });
+    const app1 = fakeApp(); ms.mount(app1, deps(pool, bad.fetch));
+    const r1 = await app1.call('POST /ms/append', Object.assign({ body: { leadId: 'l1' } }, admin));
+    assert.strictEqual(r1.status, 403);
+    ms._internals.tokenCache.clear();
+    const good = fakeMs();
+    const app2 = fakeApp(); ms.mount(app2, deps(pool, good.fetch));
+    const r2 = await app2.call('POST /ms/append', Object.assign({ body: { leadId: 'l1' } }, admin));
+    assert.strictEqual(r2.status, 200, JSON.stringify(r2.body));
+    assert.ok(!r2.body.skipped, 'a failed attempt must not count as written');
+    assert.strictEqual(good.calls.filter(c => /rows\/add/.test(c.url)).length, 1);
   });
 
   await t('append is a no-op when the destination is off', async () => {

@@ -32,6 +32,7 @@ window.I18N = (function () {
     n_leads_moved_to_you: ['User removed — {n} lead moved to you', 'User removed — {n} leads moved to you'],
     n_leads_queued_offline: ['{n} lead queued (offline) — will sync', '{n} leads queued (offline) — will sync'],
     n_leads_synced: ['{n} queued lead synced', '{n} queued leads synced'],
+    n_rows_written: ['{n} row written to the shared file', '{n} rows written to the shared file'],
     n_used_by_leads: ['It is used by {n} lead; its existing value is kept. ', 'It is used by {n} leads; their existing value is kept. '],
     n_leads_at_event: ['{n} lead was captured at this event — it will be kept but lose the event reference.', '{n} leads were captured at this event — they will be kept but lose the event reference.']
   };
@@ -51,6 +52,7 @@ window.I18N = (function () {
     n_leads_moved_to_you: ['Utente rimosso — {n} lead passato a te', 'Utente rimosso — {n} lead passati a te'],
     n_leads_queued_offline: ['{n} lead in coda (offline) — verrà sincronizzato', '{n} lead in coda (offline) — verranno sincronizzati'],
     n_leads_synced: ['{n} lead in coda sincronizzato', '{n} lead in coda sincronizzati'],
+    n_rows_written: ['{n} riga scritta nel file condiviso', '{n} righe scritte nel file condiviso'],
     n_used_by_leads: ['È usato da {n} lead, che lo mantiene. ', 'È usato da {n} lead, che lo mantengono. '],
     n_leads_at_event: ['{n} lead è stato raccolto a questo evento: resta salvato ma perde il riferimento all\'evento.', '{n} lead sono stati raccolti a questo evento: restano salvati ma perdono il riferimento all\'evento.'],
 
@@ -206,7 +208,7 @@ window.I18N = (function () {
     'Save draft': 'Salva bozza',
     'Draft saved': 'Bozza salvata',
     'Retry send': 'Riprova invio',
-    'Send to Brevo': 'Invia a Brevo',
+    'Send': 'Invia',
     'Sending…': 'Invio in corso…',
     'Send failed': 'Invio non riuscito',
     'Fill all required qualification fields': 'Compila tutti i campi di qualifica obbligatori',

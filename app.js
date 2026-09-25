@@ -230,15 +230,35 @@
     const x = await pushToExcel(l);
     if (x) {
       DB.syncLog.unshift({ leadId: l.id, dest: 'Excel', ok: x.ok, ts: Date.now(), msg: x.msg });
-      if (!x.ok && r.ok) { l.error = 'Excel: ' + x.msg; saveLead(l); }
+      // Already in Brevo but not yet in the file: marked and retried later.
+      l.excelPending = !x.ok;
+      if (!x.ok && r.ok) l.error = 'Excel: ' + x.msg;
+      saveLead(l);
     }
     return r.ok;
   }
   async function flushQueued() {
     const q = DB.leads.filter(l => l.queuedOffline && (l.status === 'Ready' || l.status === 'Error'));
-    if (!q.length) return;
     for (const l of q) { await deliverLead(l); }
-    saveState(); toast(q.length + ' queued lead(s) synced', 'ok'); if (window.render) render();
+    const n = await flushExcelBacklog();
+    if (!q.length && !n) return;
+    saveState();
+    if (q.length) toast(tp('n_leads_synced', q.length), 'ok');
+    else toast(tp('n_rows_written', n), 'ok');
+    if (window.render) render();
+  }
+
+  // Sent leads whose row did not reach the shared file, retried quietly.
+  async function flushExcelBacklog() {
+    if (!(DB.ms && DB.ms.enabled) || !getToken()) return 0;
+    let done = 0;
+    for (const l of DB.leads.filter(l => l.excelPending && l.status === 'Sent')) {
+      const x = await pushToExcel(l);
+      if (x && x.ok) { l.excelPending = false; if (l.error && /^Excel:/.test(l.error)) l.error = null; done++; saveLead(l); }
+      else if (x) break;
+    }
+    if (done) saveState();
+    return done;
   }
 
   // Brevo lists (for per-event routing config in Admin)
@@ -921,7 +941,7 @@
 
       (readOnly ? syncLogCard(l) :
         '<div class="btnrow"><button class="btn ghost" id="saveDraft">'+esc(t('Save draft'))+'</button>' +
-        '<button class="btn primary" id="send">' + ic.send + ' ' + esc(l.status==='Error'?t('Retry send'):t('Send to Brevo')) + '</button></div>' +
+        '<button class="btn primary" id="send">' + ic.send + ' ' + esc(l.status==='Error'?t('Retry send'):t('Send')) + '</button></div>' +
         '<p class="hint" style="text-align:center;margin-top:10px">' + esc(I18N.lang === 'it' ? 'Destinazioni: Brevo (CRM) + Excel su SharePoint · deduplica automatica per email' : 'Destinations: Brevo (CRM) + Excel on SharePoint · auto-dedupe by email') + '</p>');
 
     shell(t('Lead'), l.company||'', body, null, { back: history.length>1 ? null : '#/leads', right:'<button class="back" data-nav="#/leads">'+ic.chevL+esc(t('Leads'))+'</button>', bind(){
@@ -1676,5 +1696,7 @@
     render();
     // Refresh from the server when the connection comes back
     window.addEventListener('online', () => { if (getToken()) pullState().then(() => render()).catch(() => {}); });
+    // Rows that failed to reach the shared file last time are retried at start-up too.
+    if (getToken() && S.online) flushExcelBacklog().then(n => { if (n) { toast(tp('n_rows_written', n), 'ok'); render(); } }).catch(() => {});
   })();
 })();

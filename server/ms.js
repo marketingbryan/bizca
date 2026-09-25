@@ -387,6 +387,13 @@ function mount(app, deps) {
       if (!cfg.enabled) return res.json({ ok: true, skipped: 'Excel destination is off' });
       if (!cfg.driveId || !cfg.itemId || !cfg.tableName) throw httpError(400, 'Excel destination is not configured');
 
+      // Written once and only once: a retry after a failed send, or a second tap
+      // on "resend", must not add a duplicate row to the customer's file.
+      const already = await pool.query(
+        "SELECT 1 FROM sync_log WHERE company_id=$1 AND lead_id=$2 AND dest='Excel' AND ok=true LIMIT 1",
+        [cid, leadId]);
+      if (already.rowCount) return res.json({ ok: true, skipped: 'already written' });
+
       const lr = await pool.query('SELECT * FROM leads WHERE id=$1 AND company_id=$2', [leadId, cid]);
       if (!lr.rowCount) throw httpError(404, 'Lead not found');
       const lead = lr.rows[0];
