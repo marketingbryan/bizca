@@ -696,64 +696,92 @@
 
   /* The one screen that decides where this capture session goes: what kind of
      contact it is, which event, and which Brevo list. Everything captured
-     afterwards inherits these three choices. */
+     afterwards inherits these three choices.
+
+     Built once and then updated in place: rebuilding the whole modal on every
+     tap made it flash and jump back to the top. */
   function eventPicker() {
-    const type = captureType();
     const evs = DB.events;
-    const ev = activeEvent();
-    const listId = sessionListId();
 
-    const typeBtn = (code, label, hint) =>
-      '<div class="select-item ' + (type === code ? 'sel' : '') + '" data-type="' + code + '" style="cursor:pointer">' +
-        '<div style="flex:1"><div style="font-weight:600">' + esc(label) + '</div>' +
-        '<div class="hint" style="margin:0">' + esc(hint) + '</div></div>' +
-        (type === code ? ic.check : '') + '</div>';
+    const row = (attr, value, title, sub) =>
+      '<div class="select-item" ' + attr + '="' + esc(value) + '" style="cursor:pointer">' +
+        '<div style="flex:1"><div style="font-weight:600">' + esc(title) + '</div>' +
+        '<div class="hint" style="margin:0">' + esc(sub) + '</div></div>' +
+        '<span class="tick"></span></div>';
 
-    const eventBlock = type !== 'event' ? '' : (evs.length
-      ? '<div class="section-title" style="margin-top:14px">' + esc(t('Which event')) + '</div>' +
-        evs.map(e => '<div class="select-item ' + (e.id === S.activeEventId ? 'sel' : '') + '" data-ev="' + e.id + '" style="cursor:pointer">' +
-          '<div style="flex:1"><div style="font-weight:600">' + esc(e.name) + '</div>' +
-          '<div class="hint" style="margin:0">' + esc(fmtDates(e)) + (e.brevoListId ? ' · ' + esc(listLabel(e.brevoListId)) : '') + '</div></div>' +
-          (e.id === S.activeEventId ? ic.check : '') + '</div>').join('')
-      : '<div class="banner" style="margin-top:14px">' + ic.info + '<div>' + esc(I18N.lang === 'it'
-          ? 'Non ci sono eventi. Chiedi all\'amministratore di crearne uno, oppure scegli Meeting personale.'
-          : 'No events yet. Ask your admin to create one, or pick Personal meeting.') + '</div></div>');
-
-    const newsName = DB.newsletterListId ? listLabel(DB.newsletterListId) : null;
-    const listBlock = (type === 'event' && !evs.length) ? '' :
-      '<div class="section-title" style="margin-top:14px">' + esc(t('Where contacts go')) + '</div>' +
-      '<div class="banner" style="margin:0">' + ic.send + '<div>' +
-        (type === 'meeting'
-          ? esc(newsName
-              ? (I18N.lang === 'it' ? 'Nessuna lista, salvo chi spunta la newsletter: quelli finiscono in «' + newsName + '».'
-                               : 'No list, except those who tick the newsletter: they go to “' + newsName + '”.')
-              : (I18N.lang === 'it' ? 'Nessuna lista. Per iscrivere chi spunta la newsletter, scegli la lista in Admin → Destinazioni.'
-                               : 'No list. To subscribe those who tick the newsletter, pick the list in Admin → Destinations.'))
-          : (ev && ev.brevoListId
-              ? esc((I18N.lang === 'it' ? 'Lista dell\'evento: ' : 'Event list: ') + listLabel(ev.brevoListId)) +
-                (newsName ? esc((I18N.lang === 'it' ? ' · chi spunta la newsletter va anche in «' : ' · newsletter tickers also go to “') + newsName + (I18N.lang === 'it' ? '».' : '”.')) : '')
-              : esc(I18N.lang === 'it' ? 'Questo evento non ha una lista Brevo: impostala in Admin → Eventi.'
-                                   : 'This event has no Brevo list: set one in Admin → Events.'))) +
-      '</div></div>';
+    const noEvents = '<div class="banner" style="margin-top:14px">' + ic.info + '<div>' + esc(I18N.lang === 'it'
+      ? 'Non ci sono eventi. Chiedi all\'amministratore di crearne uno, oppure scegli Meeting personale.'
+      : 'No events yet. Ask your admin to create one, or pick Personal meeting.') + '</div></div>';
 
     modal('<h3 style="margin:0 0 4px">' + esc(t('Before you start')) + '</h3>' +
       '<p class="hint">' + esc(I18N.lang === 'it'
         ? 'Vale per tutti i biglietti che scansioni da adesso.'
         : 'Applies to every card you scan from now on.') + '</p>' +
-      typeBtn('event', t('Event'), I18N.lang === 'it' ? 'Fiera o manifestazione' : 'Trade show or fair') +
-      typeBtn('meeting', t('Personal meeting'), I18N.lang === 'it' ? 'Incontro uno a uno, visita, appuntamento' : 'One-to-one meeting, visit, appointment') +
-      eventBlock + listBlock +
+      row('data-type', 'event', t('Event'), I18N.lang === 'it' ? 'Fiera o manifestazione' : 'Trade show or fair') +
+      row('data-type', 'meeting', t('Personal meeting'), I18N.lang === 'it' ? 'Incontro uno a uno, visita, appuntamento' : 'One-to-one meeting, visit, appointment') +
+      '<div id="evSection" style="display:none">' +
+        (evs.length
+          ? '<div class="section-title" style="margin-top:14px">' + esc(t('Which event')) + '</div>' +
+            evs.map(e => row('data-ev', e.id, e.name,
+              fmtDates(e) + (e.brevoListId ? ' \u00b7 ' + listLabel(e.brevoListId) : ''))).join('')
+          : noEvents) +
+      '</div>' +
+      '<div id="destSection">' +
+        '<div class="section-title" style="margin-top:14px">' + esc(t('Where contacts go')) + '</div>' +
+        '<div class="banner" style="margin:0">' + ic.send + '<div id="destText"></div></div>' +
+      '</div>' +
       '<button class="btn primary" id="pickDone" style="margin-top:14px">' + esc(t('Start scanning')) + '</button>' +
       '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">' + esc(t('Cancel')) + '</button>');
 
-    if (DB.brevoApiKey && !brevoLists) loadBrevoLists().then(r => { if (r && modalRoot.querySelector('[data-type]')) eventPicker(); });
+    /* Only what changed gets touched, so nothing flashes and the scroll stays put. */
+    function sync() {
+      const type = captureType();
+      const ev = activeEvent();
+      const newsName = DB.newsletterListId ? listLabel(DB.newsletterListId) : null;
 
-    modalRoot.querySelectorAll('[data-type]').forEach(x => x.onclick = () => { S.captureType = x.getAttribute('data-type'); eventPicker(); });
-    modalRoot.querySelectorAll('[data-ev]').forEach(x => x.onclick = () => { S.activeEventId = x.getAttribute('data-ev'); eventPicker(); });
+      modalRoot.querySelectorAll('[data-type]').forEach(x => {
+        const on = x.getAttribute('data-type') === type;
+        x.classList.toggle('sel', on);
+        x.querySelector('.tick').innerHTML = on ? ic.check : '';
+      });
+      modalRoot.querySelectorAll('[data-ev]').forEach(x => {
+        const on = x.getAttribute('data-ev') === S.activeEventId;
+        x.classList.toggle('sel', on);
+        x.querySelector('.tick').innerHTML = on ? ic.check : '';
+      });
+
+      const evSec = modalRoot.querySelector('#evSection');
+      if (evSec) evSec.style.display = type === 'event' ? '' : 'none';
+
+      const destSec = modalRoot.querySelector('#destSection');
+      const dest = modalRoot.querySelector('#destText');
+      if (destSec) destSec.style.display = (type === 'event' && !evs.length) ? 'none' : '';
+      if (dest) {
+        dest.textContent = type === 'meeting'
+          ? (newsName
+              ? (I18N.lang === 'it' ? 'Nessuna lista, salvo chi spunta la newsletter: quelli finiscono in \u00ab' + newsName + '\u00bb.'
+                                    : 'No list, except those who tick the newsletter: they go to \u201c' + newsName + '\u201d.')
+              : (I18N.lang === 'it' ? 'Nessuna lista. Per iscrivere chi spunta la newsletter, scegli la lista in Admin \u2192 Destinazioni.'
+                                    : 'No list. To subscribe those who tick the newsletter, pick the list in Admin \u2192 Destinations.'))
+          : (ev && ev.brevoListId
+              ? (I18N.lang === 'it' ? 'Lista dell\'evento: ' : 'Event list: ') + listLabel(ev.brevoListId) +
+                (newsName ? (I18N.lang === 'it' ? ' \u00b7 chi spunta la newsletter va anche in \u00ab' + newsName + '\u00bb.'
+                                                : ' \u00b7 newsletter tickers also go to \u201c' + newsName + '\u201d.') : '')
+              : (I18N.lang === 'it' ? 'Questo evento non ha una lista Brevo: impostala in Admin \u2192 Eventi.'
+                                    : 'This event has no Brevo list: set one in Admin \u2192 Events.'));
+      }
+    }
+
+    modalRoot.querySelectorAll('[data-type]').forEach(x => x.onclick = () => { S.captureType = x.getAttribute('data-type'); sync(); });
+    modalRoot.querySelectorAll('[data-ev]').forEach(x => x.onclick = () => { S.activeEventId = x.getAttribute('data-ev'); sync(); });
     document.getElementById('pickDone').onclick = () => {
       if (captureType() === 'event' && !S.activeEventId) { toast(t('Pick an event first'), 'err'); return; }
       saveState(); closeModal(); toast(t('Ready to scan'), 'ok'); render();
     };
+
+    sync();
+    // Brevo list names can arrive late: refresh the wording, not the whole modal.
+    if (DB.brevoApiKey && !brevoLists) loadBrevoLists().then(r => { if (r && modalRoot.querySelector('[data-type]')) sync(); });
   }
 
   /* ---------- Scan ---------- */

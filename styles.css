@@ -157,7 +157,8 @@ select.input{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg 
 .select-item.sel{border-color:var(--indigo);background:#E0F2FE}
 /* Inline SVGs carry no width of their own: without this they stretch to fill
    the row and squeeze the text into a column. */
-.select-item>svg{width:22px;height:22px;flex:none;color:var(--indigo)}
+.select-item>svg,.select-item .tick svg{width:22px;height:22px;flex:none;color:var(--indigo)}
+.select-item .tick{display:flex;align-items:center;width:22px;flex:none}
 .select-item>div{min-width:0}
 .select-item input[type=checkbox]{flex:none}
 .pill svg{width:14px;height:14px;flex:none}
