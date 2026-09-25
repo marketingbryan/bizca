@@ -38,9 +38,14 @@ module.exports = async (req, res) => {
     const email = (lead.email || '').trim();
     if (!email) { res.status(400).json({ error: 'Lead has no email — Brevo requires an email address' }); return; }
 
-    // Destination list comes from the lead's event (tenant-scoped only)
+    // Destination list: chosen for this capture session (tenant-scoped only).
+    // The newsletter list is added on top, and only when the contact ticked the box.
     const bodyListId = parseInt(body.listId, 10);
-    const listIds = Number.isFinite(bodyListId) ? [bodyListId] : undefined;
+    const newsListId = parseInt(body.newsletterListId, 10);
+    const ids = [];
+    if (Number.isFinite(bodyListId)) ids.push(bodyListId);
+    if (lead.newsletter && Number.isFinite(newsListId) && ids.indexOf(newsListId) < 0) ids.push(newsListId);
+    const listIds = ids.length ? ids : undefined;
 
     // Full attribute set: standard + Bizca custom attributes
     const full = {
@@ -56,7 +61,8 @@ module.exports = async (req, res) => {
       BIZCA_INTEREST: lead.interesse || '',
       BIZCA_EVENT: lead.event || '',
       BIZCA_OWNER: lead.owner || '',
-      BIZCA_CONSENT: lead.consent || ''
+      BIZCA_CONSENT: lead.consent || '',
+      BIZCA_NEWSLETTER: lead.newsletter ? 'yes' : 'no'
     };
 
     let result = await brevoUpsert(key, email, full, listIds);

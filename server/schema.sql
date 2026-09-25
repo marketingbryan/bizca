@@ -88,9 +88,17 @@ CREATE TABLE IF NOT EXISTS leads (
   card_image    TEXT,
   consent_at    TIMESTAMPTZ,
   consent_sig   TEXT,
+  newsletter    BOOLEAN NOT NULL DEFAULT false,  -- ticked next to the signature
+  capture_type  TEXT,                            -- 'event' | 'meeting'
+  brevo_list_id INTEGER,                         -- list chosen for this capture
   captured_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Added after the first release: keep existing deployments migrating cleanly.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS newsletter BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS capture_type TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS brevo_list_id INTEGER;
+
 CREATE INDEX IF NOT EXISTS leads_company_idx ON leads (company_id);
 CREATE INDEX IF NOT EXISTS leads_owner_idx ON leads (company_id, owner_id);
 

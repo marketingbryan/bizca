@@ -102,6 +102,17 @@ window.I18N = (function () {
     'Password must be at least 8 characters': 'La password deve avere almeno 8 caratteri',
     'Please accept the privacy policy to continue': 'Accetta l\'informativa privacy per continuare',
 
+    /* ---- attivazione account invitato ---- */
+    'Activate your account': 'Attiva il tuo account',
+    'Welcome to Bizca': 'Benvenuto in Bizca',
+    'Activate and sign in': 'Attiva ed entra',
+    'Activating…': 'Attivazione…',
+    'Account activated': 'Account attivato',
+    'This invitation link is incomplete': 'Il link di invito è incompleto',
+    'invitation pending': 'invito da accettare',
+    'resend invitation': 'rimanda invito',
+    'Invitation sent again': 'Invito inviato di nuovo',
+
     /* ---- email confirmation ---- */
     'One last step': 'Ultimo passaggio',
     'Check your inbox': 'Controlla la posta',
@@ -120,12 +131,12 @@ window.I18N = (function () {
     'Signed in with Google': 'Accesso effettuato con Google',
     'Google sign-in not configured yet.': 'Accesso con Google non ancora configurato.',
     'Google sign-in unavailable.': 'Accesso con Google non disponibile.',
-    'Microsoft SSO is enabled once your IT completes the Azure AD setup': 'L\'accesso Microsoft si attiva quando il vostro IT completa la configurazione su Entra ID',
+    'Type your work email first, then Microsoft': 'Scrivi prima la tua email di lavoro, poi premi Microsoft',
+    'Redirecting to Microsoft…': 'Ti mando su Microsoft…',
+    'Signed in with Microsoft': 'Accesso effettuato con Microsoft',
 
     /* ---- home ---- */
     'Install Bizca on your device': 'Installa Bizca sul tuo dispositivo',
-    'Active event': 'Evento attivo',
-    'Switch event': 'Cambia evento',
     'No event yet': 'Nessun evento',
     'Create event': 'Crea evento',
     'Ask your admin to create one.': 'Chiedi all\'amministratore di crearne uno.',
@@ -152,6 +163,25 @@ window.I18N = (function () {
     'Could not read image': 'Immagine non leggibile',
     'none': 'nessuno',
 
+    /* ---- sessione di raccolta ---- */
+    'Before you start': 'Prima di cominciare',
+    'Personal meeting': 'Meeting personale',
+    'Which event': 'Quale evento',
+    'Brevo list': 'Lista Brevo',
+    'Where contacts go': 'Dove finiscono i contatti',
+    'no list': 'nessuna lista',
+    'Start scanning': 'Inizia a scansionare',
+    'Ready to scan': 'Pronto per scansionare',
+    'Pick an event first': 'Scegli prima un evento',
+    'Change': 'Cambia',
+    'Select all': 'Seleziona tutti',
+    'Clear all': 'Deseleziona tutti',
+    'Newsletter': 'Newsletter',
+    'Newsletter list': 'Lista newsletter',
+    'Newsletter list updated': 'Lista newsletter aggiornata',
+    'subscribed': 'iscritto',
+    'not subscribed': 'non iscritto',
+
     /* ---- lead ---- */
     'Lead': 'Lead',
     'Contact': 'Contatto',
@@ -168,8 +198,6 @@ window.I18N = (function () {
     'Country': 'Paese',
     'Segment': 'Segmento',
     'Assignment': 'Assegnazione',
-    'Owner (seller)': 'Titolare (commerciale)',
-    'You can override the suggested owner.': 'Puoi sovrascrivere il titolare suggerito.',
     'Save draft': 'Salva bozza',
     'Draft saved': 'Bozza salvata',
     'Retry send': 'Riprova invio',

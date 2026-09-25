@@ -41,6 +41,7 @@
     DB.requireConsent = !!s.requireConsent;
     DB.allowOverride = s.allowOverride !== false;
     DB.brevoApiKey = s.brevoApiKey || '';
+    DB.newsletterListId = s.newsletterListId || null;
     DB.ms = d.ms || { enabled: false };
     DB.fallbackOwner = s.fallbackOwner || (DB.users[0] && DB.users[0].id) || null;
     S.user = DB.users.find(u => u.id === d.me.id) || null;
@@ -84,7 +85,29 @@
   const initials = n => n.split(' ').map(w => w[0]).slice(0,2).join('').toUpperCase();
   const userName = id => (DB.users.find(u => u.id === id) || {}).name || '—';
   const activeEvent = () => DB.events.find(e => e.id === S.activeEventId) || DB.events[0];
-  const pick = t => DB.pickLists[t].filter(v => v.active);
+  // What this capture session is: a trade show, or a one-to-one meeting.
+  const captureType = () => (S.captureType === 'meeting' ? 'meeting' : 'event');
+  const sourceLabel = () => captureType() === 'meeting' ? t('Personal meeting') : t('Event');
+  /* Where a lead lands in Brevo:
+       event   → the list configured for that event, plus the newsletter list if ticked
+       meeting → nothing, unless the newsletter is ticked — then only that list
+     So the destination follows the choice made before scanning; there is nothing
+     to pick by hand, and a meeting contact is never added to an event list. */
+  const sessionListId = () => {
+    if (captureType() !== 'event') return null;
+    const ev = activeEvent();
+    return ev && ev.brevoListId ? ev.brevoListId : null;
+  };
+  const listLabel = id => {
+    if (!id) return t('no list');
+    const l = (brevoLists || []).find(x => x.id === id);
+    return l ? l.name : ((I18N.lang === 'it' ? 'lista #' : 'list #') + id);
+  };
+  const pick = k => DB.pickLists[k].filter(v => v.active);
+  // Segments are multiple. Stored joined so Brevo and Excel keep a plain text
+  // column, handled as a list everywhere in the interface.
+  const segList = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
+  const segJoin = arr => arr.join(', ');
 
   /* ---------- language ----------
      A personal choice on this device beats the workspace default. Clearing the
@@ -112,8 +135,9 @@
         assignmentRules: DB.assignmentRules, users: DB.users, destinations: DB.destinations,
         fallbackOwner: DB.fallbackOwner, allowOverride: DB.allowOverride, autoSend: DB.autoSend,
         requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey, ms: DB.ms,
+        newsletterListId: DB.newsletterListId,
         syncLog: DB.syncLog.slice(0, 300),
-        session: { activeEventId: S.activeEventId, userId: S.user ? S.user.id : null }
+        session: { activeEventId: S.activeEventId, captureType: S.captureType, userId: S.user ? S.user.id : null }
       };
       try {
         localStorage.setItem(STORE_KEY, JSON.stringify(snap));
@@ -136,9 +160,10 @@
       if (!raw) return;
       const d = JSON.parse(raw);
       ['company','leads','pickLists','events','assignmentRules','users','destinations','syncLog'].forEach(k => { if (d[k]) DB[k] = d[k]; });
-      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey','ms'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
+      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey','ms','newsletterListId'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
       if (d.session) {
         if (d.session.activeEventId) S.activeEventId = d.session.activeEventId;
+        if (d.session.captureType) S.captureType = d.session.captureType;
         // only trust a cached session if we still hold a token
         if (d.session.userId && getToken()) { const u = DB.users.find(x => x.id === d.session.userId); if (u) S.user = u; }
       }
@@ -172,10 +197,14 @@
     try {
       const res = await fetch('/api/send-brevo', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: DB.brevoApiKey || undefined, listId: ev.brevoListId || undefined, lead: {
+        body: JSON.stringify({ apiKey: DB.brevoApiKey || undefined,
+          listId: (l.brevoListId || ev.brevoListId) || undefined,
+          newsletterListId: DB.newsletterListId || undefined,
+          lead: {
           first: l.first, last: l.last, company: l.company, role: l.role, email: l.email,
           phone: l.phone, website: l.website, address: l.address,
           provenienza: l.provenienza, country: l.country, interesse: l.interesse, event: evName, owner: ownerName,
+          newsletter: !!l.newsletter,
           consent: l.consentAt ? new Date(l.consentAt).toISOString().slice(0, 10) : ''
         } })
       });
@@ -272,21 +301,8 @@
   const statusPill = s => '<span class="pill ' + STATUS[s].pill + '">' + esc(statusLabel(s)) + '</span>';
   const requiredFilled = l => l.provenienza && l.country && l.interesse && (l.first || l.last);
 
-  /* ---------- assignment engine ---------- */
-  function assign(country, interesse) {
-    for (const r of DB.assignmentRules.filter(r => r.active).sort((a,b) => a.priority - b.priority)) {
-      const cOk = !r.countries.length || r.countries.includes(country);
-      const iOk = !r.interests.length || r.interests.includes(interesse);
-      if (cOk && iOk) return { owner: r.owner, ruleId: r.id, rule: r };
-    }
-    return { owner: DB.fallbackOwner, ruleId: null, rule: null };
-  }
-  function ruleSummary(r) {
-    if (!r) return t('Fallback → default owner');
-    const c = r.countries.length ? r.countries.join('/') : t('any country');
-    const i = r.interests.length ? r.interests.join('/') : t('any segment');
-    return (I18N.lang === 'it' ? 'Regola #' : 'Rule #') + r.priority + ': ' + c + ' + ' + i;
-  }
+  /* The lead belongs to whoever captured it. No routing rules: the person who
+     spoke to the contact is the person who follows up. */
 
   /* ================= SCREENS ================= */
 
@@ -457,6 +473,57 @@
     };
   }
 
+  /* ---------- Activate an invited account ----------
+     Target of the link in the invitation email. The account already exists —
+     here the person only picks a password and is signed in straight away. */
+  function activateScreen(email, token) {
+    if (!email || !token) {
+      toast(t('This invitation link is incomplete'), 'err');
+      return go('#/login');
+    }
+    app.innerHTML =
+      '<div class="login">' +
+        '<div class="brand"><img src="icon-512.png" alt="Bizca"><h1>Bizca</h1><p>' + esc(t('Activate your account')) + '</p></div>' +
+        '<div class="card" style="box-shadow:var(--shadow-lg)">' +
+          '<h3>' + esc(t('Welcome to Bizca')) + '</h3>' +
+          '<p class="hint">' + (I18N.lang === 'it'
+            ? 'Scegli una password per <b>' + esc(email) + '</b> ed entri subito.'
+            : 'Choose a password for <b>' + esc(email) + '</b> and you are in.') + '</p>' +
+          '<div class="field"><label>' + esc(t('Full name')) + '</label><input class="input" id="acName" placeholder="Mario Rossi" autocomplete="name"></div>' +
+          '<div class="field"><label>' + esc(t('Password')) + '</label><input class="input" id="acPwd" type="password" placeholder="' + esc(t('At least 8 characters')) + '" autocomplete="new-password"></div>' +
+          '<button class="btn primary" id="acGo">' + esc(t('Activate and sign in')) + '</button>' +
+          '<p class="hint" style="text-align:center;margin:12px 0 0">' + (I18N.lang === 'it'
+            ? 'Se preferisci, puoi anche accedere con Google usando questo stesso indirizzo.'
+            : 'You can also sign in with Google using this same address.') + '</p>' +
+          '<button class="btn ghost" id="acLogin" style="margin-top:10px">' + esc(t('Go to sign in')) + '</button>' +
+          langSwitchRow() +
+        '</div>' +
+      '</div>';
+    $('#acLogin').onclick = () => go('#/login');
+    bindLangSwitch(() => activateScreen(email, token));
+
+    const submit = async () => {
+      const pwd = $('#acPwd').value || '';
+      const name = ($('#acName').value || '').trim();
+      if (pwd.length < 8) { toast(t('Password must be at least 8 characters'), 'err'); return; }
+      const btn = $('#acGo'); btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> ' + esc(t('Activating…'));
+      try {
+        const d = await api('POST', '/auth/set-password', { email, token, password: pwd, name, locale: I18N.lang });
+        setToken(d.token);
+        await pullState();
+        toast(t('Account activated'), 'ok');
+        go('#/home');
+      } catch (e) {
+        // An already-used link is a dead end here, but the person can simply sign in.
+        if (e.data && e.data.alreadyActive) { toast(e.message, 'err'); go('#/login'); return; }
+        toast(e.message, 'err');
+        btn.disabled = false; btn.textContent = t('Activate and sign in');
+      }
+    };
+    $('#acGo').onclick = submit;
+    $('#acPwd').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  }
+
   /* ---------- Login ---------- */
   let googleReady = false;
   function loginScreen() {
@@ -496,7 +563,23 @@
         toast(e.message, 'err'); reset();
       }
     };
-    $('#sso').onclick = () => toast(t('Microsoft SSO is enabled once your IT completes the Azure AD setup'));
+    $('#sso').onclick = async () => {
+      const email = ($('#email').value || '').trim().toLowerCase();
+      if (!email) {
+        toast(t('Type your work email first, then Microsoft'), 'err');
+        const f = $('#email'); if (f) f.focus();
+        return;
+      }
+      const btn = $('#sso'); btn.disabled = true; const label = btn.innerHTML;
+      btn.innerHTML = '<div class="spinner"></div> ' + esc(t('Redirecting to Microsoft…'));
+      try {
+        const d = await api('POST', '/auth/microsoft/start', { email });
+        location.href = d.url;                 // leaves the app; Microsoft sends us back
+      } catch (e) {
+        toast(e.message, 'err');
+        btn.disabled = false; btn.innerHTML = label;
+      }
+    };
     $('#login').onclick = signInEmail;
     $('#pwd').addEventListener('keydown', e => { if (e.key === 'Enter') signInEmail(); });
     bindLangSwitch(() => loginScreen());
@@ -549,18 +632,7 @@
     const body =
       (deferredPrompt ? '<button class="btn soft" id="installApp" style="margin-bottom:12px">' + ic.plus + ' ' + esc(t('Install Bizca on your device')) + '</button>' : '') +
       (S.online ? '' : '<div class="banner offline-tag" style="background:#FEF3C7;border-color:#FDE68A;color:#92400E">' + ic.info + '<div>' + esc(I18N.lang === 'it' ? 'Sei offline. Acquisizioni e invii restano in coda e si sincronizzano da soli appena torna la rete.' : 'You are offline. Captures and sends are queued and will sync automatically when you are back online.') + '</div></div>') +
-      (ev ? '<div class="banner">' + ic.info + '<div>' + esc(I18N.lang === 'it' ? 'L\'evento attivo applica i preset a ogni biglietto che scansioni. Puoi cambiarlo quando vuoi.' : 'Active event applies presets to every card you scan. Switch it anytime.') + '</div></div>' +
-        '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
-          '<div class="section-title" style="margin:0 0 6px">' + esc(t('Active event')) + '</div>' +
-          '<h3 style="font-size:18px">' + esc(ev.name) + '</h3>' +
-          '<p class="hint" style="margin:2px 0 12px">' + esc(fmtDates(ev)) + ' · ' + presetSummary(ev) + '</p>' +
-          '<button class="btn ghost sm" id="switchEv">' + esc(t('Switch event')) + '</button>' +
-        '</div>'
-      : '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
-          '<div class="section-title" style="margin:0 0 6px">' + esc(t('No event yet')) + '</div>' +
-          '<p class="hint" style="margin:2px 0 12px">' + esc(I18N.lang === 'it' ? 'Crea un evento (una fiera, una manifestazione) per applicare i preset a ogni biglietto che scansioni.' : 'Create an event (trade show, fair) to apply presets to every card you scan.') + '</p>' +
-          (isAdmin() ? '<button class="btn ghost sm" data-nav="#/admin/events">' + esc(t('Create event')) + '</button>' : '<p class="hint" style="margin:0">' + esc(t('Ask your admin to create one.')) + '</p>') +
-        '</div>') +
+      captureCard() +
       '<button class="btn primary" data-nav="#/scan" style="margin-bottom:12px">' + ic.camera + ' ' + esc(t('Scan a business card')) + '</button>' +
       '<div class="btnrow" style="margin-bottom:8px">' +
         '<button class="btn soft" data-nav="#/batch">' + ic.grid + ' ' + esc(t('Batch')) + ' (' + drafts + ')</button>' +
@@ -591,16 +663,93 @@
         const inst = $('#installApp'); if (inst) inst.onclick = async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); try { await deferredPrompt.userChoice; } catch(e){} deferredPrompt = null; render(); };
       }});
   }
+  /* What the next scan will be filed as. Tapping it reopens the picker. */
+  function captureCard() {
+    const type = captureType();
+    const ev = activeEvent();
+    const listId = sessionListId();
+    const title = type === 'meeting' ? t('Personal meeting') : (ev ? ev.name : t('No event yet'));
+    const sub = type === 'meeting'
+      ? esc(I18N.lang === 'it' ? 'Solo newsletter, se spuntata' : 'Newsletter only, if ticked')
+      : (ev ? esc(fmtDates(ev)) + ' · ' + (listId ? esc(listLabel(listId)) : esc(t('no list'))) : '');
+    const warn = (type === 'event' && !ev)
+      ? '<p class="hint" style="margin:2px 0 12px">' + esc(I18N.lang === 'it'
+          ? 'Scegli un evento o passa a Meeting personale prima di scansionare.'
+          : 'Pick an event or switch to Personal meeting before scanning.') + '</p>'
+      : '';
+    return '<div class="card" style="background:linear-gradient(135deg,#EEF2FF,#ECFEFF)">' +
+        '<div class="section-title" style="margin:0 0 6px">' + esc(sourceLabel()) + '</div>' +
+        '<h3 style="font-size:18px">' + esc(title) + '</h3>' +
+        (sub ? '<p class="hint" style="margin:2px 0 12px">' + sub + '</p>' : '') + warn +
+        '<button class="btn ghost sm" id="switchEv">' + esc(t('Change')) + '</button>' +
+      '</div>';
+  }
+
   const presetSummary = ev => ['provenienza','country','interesse']
     .map(k => k === 'country' ? (ev.preset[k] && tc(ev.preset[k])) : ev.preset[k])
     .filter(Boolean).join(' · ') || t('no presets');
   const stat = (n,l,c) => '<div class="stat"><div class="num '+(c||'')+'">'+n+'</div><div class="lbl">'+esc(l)+'</div></div>';
 
+  /* The one screen that decides where this capture session goes: what kind of
+     contact it is, which event, and which Brevo list. Everything captured
+     afterwards inherits these three choices. */
   function eventPicker() {
-    modal('<h3 style="margin:0 0 4px">' + esc(t('Select active event')) + '</h3><p class="hint">' + esc(t('Presets pre-fill qualification fields.')) + '</p>' +
-      DB.events.map(e => '<div class="select-item ' + (e.id===S.activeEventId?'sel':'') + '" data-ev="' + e.id + '"><div style="flex:1"><div style="font-weight:600">' + esc(e.name) + '</div><div class="hint" style="margin:0">' + esc(fmtDates(e)) + ' · ' + presetSummary(e) + '</div></div>' + (e.id===S.activeEventId?ic.check:'') + '</div>').join('') +
-      '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">' + esc(t('Close')) + '</button>');
-    modalRoot.querySelectorAll('[data-ev]').forEach(x => x.onclick = () => { S.activeEventId = x.getAttribute('data-ev'); closeModal(); toast(t('Active event updated'),'ok'); render(); });
+    const type = captureType();
+    const evs = DB.events;
+    const ev = activeEvent();
+    const listId = sessionListId();
+
+    const typeBtn = (code, label, hint) =>
+      '<div class="select-item ' + (type === code ? 'sel' : '') + '" data-type="' + code + '" style="cursor:pointer">' +
+        '<div style="flex:1"><div style="font-weight:600">' + esc(label) + '</div>' +
+        '<div class="hint" style="margin:0">' + esc(hint) + '</div></div>' +
+        (type === code ? ic.check : '') + '</div>';
+
+    const eventBlock = type !== 'event' ? '' : (evs.length
+      ? '<div class="section-title" style="margin-top:14px">' + esc(t('Which event')) + '</div>' +
+        evs.map(e => '<div class="select-item ' + (e.id === S.activeEventId ? 'sel' : '') + '" data-ev="' + e.id + '" style="cursor:pointer">' +
+          '<div style="flex:1"><div style="font-weight:600">' + esc(e.name) + '</div>' +
+          '<div class="hint" style="margin:0">' + esc(fmtDates(e)) + (e.brevoListId ? ' · ' + esc(listLabel(e.brevoListId)) : '') + '</div></div>' +
+          (e.id === S.activeEventId ? ic.check : '') + '</div>').join('')
+      : '<div class="banner" style="margin-top:14px">' + ic.info + '<div>' + esc(I18N.lang === 'it'
+          ? 'Non ci sono eventi. Chiedi all\'amministratore di crearne uno, oppure scegli Meeting personale.'
+          : 'No events yet. Ask your admin to create one, or pick Personal meeting.') + '</div></div>');
+
+    const newsName = DB.newsletterListId ? listLabel(DB.newsletterListId) : null;
+    const listBlock = (type === 'event' && !evs.length) ? '' :
+      '<div class="section-title" style="margin-top:14px">' + esc(t('Where contacts go')) + '</div>' +
+      '<div class="banner" style="margin:0">' + ic.send + '<div>' +
+        (type === 'meeting'
+          ? esc(newsName
+              ? (I18N.lang === 'it' ? 'Nessuna lista, salvo chi spunta la newsletter: quelli finiscono in «' + newsName + '».'
+                               : 'No list, except those who tick the newsletter: they go to “' + newsName + '”.')
+              : (I18N.lang === 'it' ? 'Nessuna lista. Per iscrivere chi spunta la newsletter, scegli la lista in Admin → Destinazioni.'
+                               : 'No list. To subscribe those who tick the newsletter, pick the list in Admin → Destinations.'))
+          : (ev && ev.brevoListId
+              ? esc((I18N.lang === 'it' ? 'Lista dell\'evento: ' : 'Event list: ') + listLabel(ev.brevoListId)) +
+                (newsName ? esc((I18N.lang === 'it' ? ' · chi spunta la newsletter va anche in «' : ' · newsletter tickers also go to “') + newsName + (I18N.lang === 'it' ? '».' : '”.')) : '')
+              : esc(I18N.lang === 'it' ? 'Questo evento non ha una lista Brevo: impostala in Admin → Eventi.'
+                                   : 'This event has no Brevo list: set one in Admin → Events.'))) +
+      '</div></div>';
+
+    modal('<h3 style="margin:0 0 4px">' + esc(t('Before you start')) + '</h3>' +
+      '<p class="hint">' + esc(I18N.lang === 'it'
+        ? 'Vale per tutti i biglietti che scansioni da adesso.'
+        : 'Applies to every card you scan from now on.') + '</p>' +
+      typeBtn('event', t('Event'), I18N.lang === 'it' ? 'Fiera o manifestazione' : 'Trade show or fair') +
+      typeBtn('meeting', t('Personal meeting'), I18N.lang === 'it' ? 'Incontro uno a uno, visita, appuntamento' : 'One-to-one meeting, visit, appointment') +
+      eventBlock + listBlock +
+      '<button class="btn primary" id="pickDone" style="margin-top:14px">' + esc(t('Start scanning')) + '</button>' +
+      '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">' + esc(t('Cancel')) + '</button>');
+
+    if (DB.brevoApiKey && !brevoLists) loadBrevoLists().then(r => { if (r && modalRoot.querySelector('[data-type]')) eventPicker(); });
+
+    modalRoot.querySelectorAll('[data-type]').forEach(x => x.onclick = () => { S.captureType = x.getAttribute('data-type'); eventPicker(); });
+    modalRoot.querySelectorAll('[data-ev]').forEach(x => x.onclick = () => { S.activeEventId = x.getAttribute('data-ev'); eventPicker(); });
+    document.getElementById('pickDone').onclick = () => {
+      if (captureType() === 'event' && !S.activeEventId) { toast(t('Pick an event first'), 'err'); return; }
+      saveState(); closeModal(); toast(t('Ready to scan'), 'ok'); render();
+    };
   }
 
   /* ---------- Scan ---------- */
@@ -608,7 +757,9 @@
     const body =
       '<div class="card">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
-          '<div><h3 style="margin:0">' + esc(t('Scan card')) + '</h3><p class="hint" style="margin:0">' + esc(t('Event')) + ': ' + esc(activeEvent() ? activeEvent().name : t('none')) + '</p></div>' +
+          '<div><h3 style="margin:0">' + esc(t('Scan card')) + '</h3><p class="hint" style="margin:0">' + esc(sourceLabel()) + (captureType() === 'event' && activeEvent() ? ': ' + esc(activeEvent().name) : '') + ' · ' + esc(captureType() === 'meeting'
+          ? (I18N.lang === 'it' ? 'solo newsletter' : 'newsletter only')
+          : listLabel(sessionListId())) + '</p></div>' +
           '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:13px;font-weight:600;color:var(--slate)">' + esc(t('Batch')) + '</span><div class="switch ' + (batchMode?'on':'') + '" id="batchToggle"></div></div>' +
         '</div>' +
         '<div class="scanview" id="scanview"><div class="frame"></div><div style="text-align:center;color:#94A3B8"><div style="width:46px;height:46px;margin:0 auto;color:#CBD5E1">' + ic.camera + '</div><div style="font-size:13px;margin-top:10px">' + esc(t('Point at a business card')) + '</div></div></div>' +
@@ -681,10 +832,11 @@
       id: 'l' + Date.now(),
       first: d.first || '', last: d.last || '', company: d.company || '', role: d.role || '',
       email: d.email || '', phone: d.phone || '', website: d.website || '', address: d.address || '',
-      provenienza: preset.provenienza || '', country: d.country || preset.country || '', interesse: preset.interesse || '',
-      eventId: ev ? ev.id : null, ownerId: null, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
+      provenienza: sourceLabel(), country: d.country || preset.country || '', interesse: preset.interesse || '',
+      eventId: captureType() === 'event' && ev ? ev.id : null,
+      captureType: captureType(), brevoListId: sessionListId(), newsletter: false,
+      ownerId: user().id, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
     };
-    if (lead.country && lead.interesse) lead.ownerId = assign(lead.country, lead.interesse).owner;
     DB.leads.unshift(lead);
     saveState(); saveLead(lead);
     if (isReal) toast(t('Card read with AI'), 'ok');
@@ -698,12 +850,8 @@
     const l = DB.leads.find(x => x.id === id);
     if (!l) return go('#/leads');
     const readOnly = l.status === 'Sent';
-    const a = assign(l.country, l.interesse);
-    if (l.status !== 'Sent' && !l.override) l.ownerId = (l.country && l.interesse) ? a.owner : l.ownerId;
-    const provOpts = optList(pick('provenienza').map(v=>v.value), l.provenienza);
-    const intOpts = optList(pick('interesse').map(v=>v.value), l.interesse);
+    if (!l.ownerId) l.ownerId = l.createdBy || user().id;
     const ctryOpts = optList(DB.countries, l.country, tc);
-    const ownerOpts = DB.users.filter(u=>u.role==='seller').map(u=>'<option value="'+u.id+'" '+(u.id===l.ownerId?'selected':'')+'>'+esc(u.name)+'</option>').join('');
 
     const contact = ['first','last','company','role','email','phone','website','address'];
     const labels = { first:t('First name'), last:t('Last name'), company:t('Company'), role:t('Role'), email:t('Email'), phone:t('Phone'), website:t('Website'), address:t('Address') };
@@ -715,21 +863,17 @@
     const body =
       '<div class="lead" style="margin-bottom:16px"><div class="avatar">' + esc(initials((l.first||'?')+' '+(l.last||''))) + '</div>' +
         '<div class="meta"><div class="name">' + esc((l.first+' '+l.last).trim()||t('Unnamed')) + '</div><div class="co">' + esc(l.company||'—') + '</div>' +
-        '<div class="tags">' + statusPill(l.status) + (l.override?'<span class="pill indigo">'+esc(t('override'))+'</span>':'') + '</div></div></div>' +
+        '<div class="tags">' + statusPill(l.status) + '</div></div></div>' +
 
       (l.status==='Error' ? '<div class="banner" style="background:#FEF2F2;border-color:#FECACA;color:#991B1B">'+ic.alert+'<div>'+esc(l.error||t('Send failed'))+'</div></div>' : '') +
 
       '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(t('Contact'))+'</h3><span class="pill indigo">'+ic.bolt+' '+esc(t('AI extracted'))+'</span></div><p class="hint">'+esc(t('Confirm or fix the fields below.'))+'</p>' + (l.image ? '<img src="'+l.image+'" alt="business card" style="width:100%;max-height:160px;object-fit:cover;border-radius:12px;margin-bottom:12px;border:1px solid var(--line)">' : '') + contactFields + '</div>' +
 
       '<div class="card"><h3>'+esc(t('Qualification'))+'</h3><p class="hint">'+esc(t('Required before sending. Managed as closed lists by admin.'))+'</p>' +
-        '<div class="field"><label>'+esc(t('Source'))+' <span class="req">*</span></label><select class="input" data-q="provenienza" '+(readOnly?'disabled':'')+'>'+provOpts+'</select></div>' +
+        '<div class="kv"><span class="k">'+esc(t('Source'))+'</span><span class="v">'+esc(l.provenienza || '—')+'</span></div>' +
+        '<p class="hint" style="margin:6px 0 12px">'+esc(I18N.lang === 'it' ? 'Impostata quando hai scelto evento o meeting.' : 'Set when you chose the event or meeting.')+'</p>' +
         '<div class="field"><label>'+esc(t('Country'))+' <span class="req">*</span></label><select class="input" data-q="country" '+(readOnly?'disabled':'')+'>'+ctryOpts+'</select></div>' +
-        '<div class="field" style="margin-bottom:0"><label>'+esc(t('Segment'))+' <span class="req">*</span></label><select class="input" data-q="interesse" '+(readOnly?'disabled':'')+'>'+intOpts+'</select></div>' +
-      '</div>' +
-
-      '<div class="card"><h3>'+esc(t('Assignment'))+'</h3><p class="hint" id="ruleHint">' + esc(ruleSummary(a.rule)) + '</p>' +
-        '<div class="field" style="margin-bottom:0"><label>'+esc(t('Owner (seller)'))+'</label><select class="input" data-owner '+(readOnly||!DB.allowOverride?'disabled':'')+'>'+ownerOpts+'</select>' +
-        (DB.allowOverride && !readOnly ? '<p class="hint" style="margin:6px 0 0">'+esc(t('You can override the suggested owner.'))+'</p>' : '') + '</div>' +
+        '<div class="field" style="margin-bottom:0"><label>'+esc(t('Segment'))+' <span class="req">*</span></label>' + segChips(l, readOnly) + '</div>' +
       '</div>' +
 
       consentCard(l, readOnly) +
@@ -742,17 +886,68 @@
     shell(t('Lead'), l.company||'', body, null, { back: history.length>1 ? null : '#/leads', right:'<button class="back" data-nav="#/leads">'+ic.chevL+esc(t('Leads'))+'</button>', bind(){
       // live updates
       app.querySelectorAll('[data-f]').forEach(inp => inp.oninput = () => { l[inp.getAttribute('data-f')] = inp.value; });
-      app.querySelectorAll('[data-q]').forEach(sel => sel.onchange = () => {
-        l[sel.getAttribute('data-q')] = sel.value;
-        if (!l.override) { const na = assign(l.country, l.interesse); if (l.country && l.interesse) { l.ownerId = na.owner; } app.querySelector('[data-owner]').value = l.ownerId || ''; }
-        $('#ruleHint').textContent = ruleSummary(assign(l.country, l.interesse).rule);
-      });
-      const ow = app.querySelector('[data-owner]'); if (ow) ow.onchange = () => { l.ownerId = ow.value; l.override = true; };
+      app.querySelectorAll('[data-q]').forEach(sel => sel.onchange = () => { l[sel.getAttribute('data-q')] = sel.value; });
+      bindSegChips(l, () => leadScreen(l.id));
+      const nk = $('#newsOk'); if (nk) nk.onchange = () => { l.newsletter = nk.checked; saveState(); saveLead(l); };
       const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; saveState(); saveLead(l); toast(t('Draft saved'),'ok'); go('#/leads'); };
       const sb = $('#send'); if (sb) sb.onclick = () => sendLead(l);
       const rs = $('#reSign'); if (rs) rs.onclick = () => { l.consentSignature = null; l.consentAt = null; saveState(); saveLead(l); leadScreen(l.id); };
       initSigPad(l);
     }});
+  }
+
+  /* A second, separate consent: being contacted about what you discussed is not
+     the same as subscribing to a newsletter, so it needs its own unticked box. */
+  function newsletterTick(l, readOnly) {
+    const on = !!l.newsletter;
+    if (readOnly) {
+      return '<div class="kv" style="border:none;margin-top:10px"><span class="k">' + esc(t('Newsletter')) + '</span>' +
+        '<span class="v">' + (on ? '<span class="pill green">' + ic.check + ' ' + esc(t('subscribed')) + '</span>'
+                                 : '<span class="pill gray">' + esc(t('not subscribed')) + '</span>') + '</span></div>';
+    }
+    return '<label class="select-item" for="newsOk" style="cursor:pointer;margin-top:12px">' +
+      '<input type="checkbox" id="newsOk" ' + (on ? 'checked' : '') + ' style="width:20px;height:20px;accent-color:var(--indigo)">' +
+      '<span style="font-size:13px;color:var(--slate)">' + esc(I18N.lang === 'it'
+        ? 'Desidero ricevere la newsletter di ' + DB.company.name + ' con novità e aggiornamenti commerciali.'
+        : 'I would like to receive the ' + DB.company.name + ' newsletter with news and commercial updates.') + '</span></label>';
+  }
+
+  /* Segment picker: tap to toggle, plus one control that takes or clears the lot. */
+  function segChips(l, readOnly) {
+    const all = pick('interesse').map(v => v.value);
+    if (!all.length) {
+      return '<p class="hint" style="margin:0">' + esc(I18N.lang === 'it'
+        ? 'Nessun segmento definito. L\'amministratore li crea in Admin → Segmenti.'
+        : 'No segments defined yet. An admin creates them in Admin → Segments.') + '</p>';
+    }
+    const chosen = segList(l.interesse);
+    const allOn = chosen.length === all.length;
+    return '<div class="tags" style="gap:8px">' +
+      (readOnly ? '' :
+        '<button class="pill ' + (allOn ? 'indigo' : 'gray') + '" data-segall="1" style="border:none;cursor:pointer">' +
+          (allOn ? ic.check + ' ' : '') + esc(allOn ? t('Clear all') : t('Select all')) + '</button>') +
+      all.map(v => {
+        const on = chosen.indexOf(v) >= 0;
+        return '<button class="pill ' + (on ? 'blue' : 'gray') + '"' + (readOnly ? ' disabled' : ' data-seg="' + esc(v) + '"') +
+          ' style="border:none;' + (readOnly ? '' : 'cursor:pointer') + '">' + (on ? ic.check + ' ' : '') + esc(v) + '</button>';
+      }).join('') + '</div>';
+  }
+
+  function bindSegChips(l, rerender) {
+    const all = pick('interesse').map(v => v.value);
+    app.querySelectorAll('[data-seg]').forEach(b => b.onclick = () => {
+      const v = b.getAttribute('data-seg');
+      const cur = segList(l.interesse);
+      const i = cur.indexOf(v);
+      if (i >= 0) cur.splice(i, 1); else cur.push(v);
+      l.interesse = segJoin(cur);
+      rerender();
+    });
+    const allBtn = app.querySelector('[data-segall]');
+    if (allBtn) allBtn.onclick = () => {
+      l.interesse = segList(l.interesse).length === all.length ? '' : segJoin(all);
+      rerender();
+    };
   }
 
   function consentCard(l, readOnly) {
@@ -772,6 +967,7 @@
         : '<canvas id="sigPad" style="width:100%;height:150px;border:1.5px dashed var(--line);border-radius:12px;background:#fff;touch-action:none"></canvas>' +
           '<div class="btnrow" style="margin-top:10px"><button class="btn ghost sm" id="sigClear">'+esc(t('Clear'))+'</button><button class="btn soft sm" id="sigSave">'+esc(t('Save signature'))+'</button></div>') +
       (has ? '<p class="hint" style="margin:8px 0 0">'+esc(I18N.lang === 'it' ? 'Firmato il ' : 'Signed ')+esc(when)+'</p>' : '') +
+      newsletterTick(l, readOnly) +
       '</div>';
   }
 
@@ -849,7 +1045,7 @@
     const body =
       '<div class="banner">'+ic.grid+'<div>'+esc(I18N.lang === 'it' ? 'Rivedi i biglietti acquisiti, applica il preset dell\'evento a tutti, assegna in automatico e invia quelli pronti.' : 'Review captured cards, apply the event preset in bulk, auto-assign and send the ready ones.')+'</div></div>' +
       (q.length ? (
-        '<div class="btnrow" style="margin-bottom:14px"><button class="btn soft sm" id="applyPreset" style="flex:1">'+esc(t('Apply preset'))+'</button><button class="btn soft sm" id="autoAssign" style="flex:1">'+esc(t('Auto-assign'))+'</button></div>' +
+        '<button class="btn soft sm" id="applyPreset" style="margin-bottom:14px">'+esc(t('Apply preset'))+'</button>' +
         q.map(l => {
           const ready = requiredFilled(l);
           return '<div class="lead"><div class="checkbox '+(batchSel.has(l.id)?'on':'')+'" data-sel="'+l.id+'">'+(batchSel.has(l.id)?ic.check:'')+'</div>' +
@@ -861,8 +1057,7 @@
     shell(t('Batch queue'), tp('n_cards', q.length), body, null, { back:'#/home', bind(){
       app.querySelectorAll('[data-sel]').forEach(c => c.onclick = () => { const id=c.getAttribute('data-sel'); batchSel.has(id)?batchSel.delete(id):batchSel.add(id); batchScreen(); });
       app.querySelectorAll('[data-open]').forEach(m => m.onclick = () => go('#/lead?id=' + m.getAttribute('data-open')));
-      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast(t('No active event'),'err'); return; } q.forEach(l=>{ if(ev.preset.provenienza)l.provenienza=ev.preset.provenienza; if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(requiredFilled(l)){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; l.status='Ready';} }); q.forEach(saveLead); toast(t('Preset applied to queue'),'ok'); batchScreen(); };
-      const aa=$('#autoAssign'); if(aa) aa.onclick = () => { let n=0; q.forEach(l=>{ if(l.country&&l.interesse){const a=assign(l.country,l.interesse); if(!l.override)l.ownerId=a.owner; if(requiredFilled(l))l.status='Ready'; n++;} }); q.forEach(saveLead); toast(tp('n_leads_assigned', n),'ok'); batchScreen(); };
+      const ap=$('#applyPreset'); if(ap) ap.onclick = () => { const ev=activeEvent(); if(!ev){ toast(t('No active event'),'err'); return; } q.forEach(l=>{ if(!l.provenienza)l.provenienza=sourceLabel(); if(ev.preset.country)l.country=ev.preset.country; if(ev.preset.interesse)l.interesse=ev.preset.interesse; if(!l.ownerId)l.ownerId=user().id; if(requiredFilled(l))l.status='Ready'; }); q.forEach(saveLead); toast(t('Preset applied to queue'),'ok'); batchScreen(); };
       const ss=$('#sendSel'); if(ss) ss.onclick = async () => {
         if(!batchSel.size){ toast(t('Select at least one lead'),'err'); return; }
         if(!S.online){ let q2=0; batchSel.forEach(id=>{ const l=DB.leads.find(x=>x.id===id); if(l&&requiredFilled(l)){ l.status='Ready'; l.queuedOffline=true; q2++; } }); batchSel.clear(); saveState(); toast(tp('n_leads_queued_offline', q2),'' ); batchScreen(); return; }
@@ -898,11 +1093,9 @@
     if (admin) {
       const byEvent = DB.events.map(e => [e.name, DB.leads.filter(l=>l.eventId===e.id).length]).filter(x=>x[1]);
       const bySeller = DB.users.filter(u=>u.role==='seller').map(u=>[u.name, DB.leads.filter(l=>l.ownerId===u.id).length]).filter(x=>x[1]);
-      const auto = DB.leads.filter(l=>l.ownerId&&!l.override).length, manual = DB.leads.filter(l=>l.override).length;
       body +=
         '<div class="card"><h3>'+esc(t('Leads by event'))+'</h3>' + byEvent.map(([n,c])=>'<div class="kv"><span class="k">'+esc(n)+'</span><span class="v">'+c+'</span></div>').join('') + '</div>' +
         '<div class="card"><h3>'+esc(t('Leads by owner'))+'</h3>' + bySeller.map(([n,c])=>'<div class="kv"><span class="k">'+esc(n)+'</span><span class="v">'+c+'</span></div>').join('') + '</div>' +
-        '<div class="card"><h3>'+esc(t('Assignment'))+'</h3><div class="kv"><span class="k">'+esc(t('Auto-assigned'))+'</span><span class="v">'+auto+'</span></div><div class="kv"><span class="k">'+esc(t('Manual override'))+'</span><span class="v">'+manual+'</span></div></div>' +
         '<div class="btnrow"><button class="btn ghost" id="csv">'+esc(t('Export CSV'))+'</button>' +
         (DB.ms && DB.ms.fileUrl ? '<button class="btn ghost" id="xlsx">'+esc(t('Open Excel'))+'</button>' : '') + '</div>';
     } else {
@@ -921,7 +1114,6 @@
       [t('Team & access'), tp('n_users', DB.users.length), '#/admin/team', ic.leads],
       [t('Sources'), tp('n_values', pick('provenienza').length), '#/admin/sources', ic.grid],
       [t('Segments'), tp('n_values', pick('interesse').length), '#/admin/segments', ic.grid],
-      [t('Assignment rules'), tp('n_active_rules', DB.assignmentRules.filter(r=>r.active).length), '#/admin/rules', ic.bolt],
       [t('Destinations'), (DB.brevoApiKey?t('Brevo connected'):t('Brevo not configured')), '#/admin/dest', ic.send]
     ];
     const body =
@@ -942,10 +1134,11 @@
       DB.users.map(u => '<div class="lead"><div class="avatar">'+esc(initials(u.name||u.email))+'</div>' +
         '<div class="meta"><div class="name">'+esc(u.name||u.email)+(u.id===me.id?' <span class="pill gray">'+esc(t('you'))+'</span>':'')+'</div>' +
         '<div class="co">'+esc(u.email)+'</div>' +
-        '<div class="tags"><span class="pill '+(u.role==='admin'?'indigo':'gray')+'">'+esc(u.role==='admin'?t('Admin'):t('Seller'))+'</span>'+(u.status==='active'?'':'<span class="pill red">'+esc(t('disabled'))+'</span>')+'</div></div>' +
+        '<div class="tags"><span class="pill '+(u.role==='admin'?'indigo':'gray')+'">'+esc(u.role==='admin'?t('Admin'):t('Seller'))+'</span>'+(u.status==='active'?'':'<span class="pill red">'+esc(t('disabled'))+'</span>')+(u.activated===false?'<span class="pill amber">'+esc(t('invitation pending'))+'</span>':'')+'</div></div>' +
         '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">' +
           '<div class="switch '+(u.status==='active'?'on':'')+'" data-u="'+u.id+'" title="'+esc(t('Enable / disable'))+'"></div>' +
           (u.id!==me.id?'<button class="pill gray" data-role="'+u.id+'" style="border:none;cursor:pointer">'+esc(u.role==='admin'?t('make seller'):t('make admin'))+'</button>':'') +
+          (u.activated===false?'<button class="pill blue" data-resend="'+u.id+'" style="border:none;cursor:pointer">'+esc(t('resend invitation'))+'</button>':'') +
         '</div></div>').join('') +
       '<button class="btn primary" id="invite" style="margin-top:8px">'+ic.plus+' '+esc(t('Add user'))+'</button>';
     shell(t('Team & access'), tp('n_users', DB.users.length), body, null, { back:'#/admin', bind(){
@@ -959,6 +1152,14 @@
         const u=DB.users.find(x=>x.id===b.getAttribute('data-role'));
         if (u.role==='admin' && DB.users.filter(x=>x.role==='admin'&&x.status==='active').length<=1) { toast(t('Keep at least one admin'),'err'); return; }
         u.role = u.role==='admin'?'seller':'admin'; saveState(); push('PATCH','/users/'+u.id,{role:u.role}); toast((u.name||u.email)+' → '+(u.role==='admin'?t('Admin'):t('Seller')),'ok'); adminTeam();
+      });
+      app.querySelectorAll('[data-resend]').forEach(b => b.onclick = async () => {
+        b.disabled = true;
+        try {
+          const r = await api('POST', '/users/' + b.getAttribute('data-resend') + '/resend', {});
+          toast(r.emailSent === false ? ((I18N.lang === 'it' ? 'Invio non riuscito: ' : 'Could not send: ') + (r.emailError || t('email not configured'))) : t('Invitation sent again'), r.emailSent === false ? 'err' : 'ok');
+        } catch (e) { toast(e.message, 'err'); }
+        b.disabled = false;
       });
       $('#invite').onclick = () => {
         modal('<h3>'+esc(t('Add user'))+'</h3><p class="hint">'+esc(t('They can then sign in with Google or their work email.'))+'</p>' +
@@ -1018,87 +1219,6 @@
       };
       $('#addVal').onclick = add;
       $('#newVal').addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
-    }});
-  }
-
-  function adminRules() {
-    const sellers = DB.users.filter(u => u.status === 'active');
-    const rules = DB.assignmentRules.slice().sort((a,b)=>a.priority-b.priority);
-    const chips = (arr, label) => arr && arr.length
-      ? arr.map(v => '<span class="pill gray">'+esc(label === (I18N.lang === 'it' ? 'paese' : 'country') ? tc(v) : v)+'</span>').join('')
-      : '<span class="pill gray">' + esc(t('any') + ' ' + label) + '</span>';
-    const list = rules.length
-      ? rules.map((r, i) => '<div class="card" style="padding:14px">' +
-          '<div style="display:flex;justify-content:space-between;align-items:start;gap:10px">' +
-            '<div style="flex:1"><div style="font-weight:700">#'+(i+1)+' → '+esc(userName(r.owner))+'</div>' +
-            '<div class="tags" style="margin-top:8px">'+chips(r.countries, I18N.lang === 'it' ? 'paese' : 'country')+'</div>' +
-            '<div class="tags" style="margin-top:6px">'+chips(r.interests, I18N.lang === 'it' ? 'segmento' : 'segment')+'</div></div>' +
-            '<div class="switch '+(r.active?'on':'')+'" data-r="'+r.id+'" title="'+esc(t('Enable / disable'))+'"></div>' +
-          '</div>' +
-          '<div class="btnrow" style="margin-top:12px">' +
-            (i>0?'<button class="btn ghost sm" data-up="'+r.id+'">↑ '+esc(t('Up'))+'</button>':'') +
-            '<button class="btn ghost sm" data-edit="'+r.id+'">'+esc(t('Edit'))+'</button>' +
-            '<button class="btn ghost sm" data-delr="'+r.id+'">'+esc(t('Delete'))+'</button>' +
-          '</div></div>').join('')
-      : '<div class="list-empty">'+ic.empty+'<p>'+esc(I18N.lang === 'it' ? 'Ancora nessuna regola. Senza regole ogni lead va al titolare predefinito.' : 'No rules yet. Without rules, every lead goes to the default owner.')+'</p></div>';
-    const body = '<div class="banner">'+ic.info+'<div>'+(I18N.lang === 'it' ? 'Le regole si leggono dall\'alto verso il basso: vince la prima che corrisponde. Una regola corrisponde quando il paese <b>e</b> il segmento del lead sono entrambi nella regola (lascia una lista vuota per accettare qualsiasi valore).' : 'Rules run top to bottom: the first match wins. A rule matches when the lead\'s country <b>and</b> segment are both in the rule (leave one empty to match any).')+'</div></div>' +
-      list +
-      '<button class="btn primary" id="newRule" style="margin-top:6px">'+ic.plus+' '+esc(t('Add rule'))+'</button>' +
-      '<div class="card" style="margin-top:14px"><h3>'+esc(t('Default owner'))+'</h3><p class="hint">'+esc(t('Used when no rule matches.'))+'</p>' +
-        '<select class="input" id="fallback">' + sellers.map(u=>'<option value="'+u.id+'" '+(DB.fallbackOwner===u.id?'selected':'')+'>'+esc(u.name||u.email)+'</option>').join('') + '</select></div>' +
-      '<div class="card"><h3>'+esc(t('Override'))+'</h3><div class="kv" style="border:none"><span class="k">'+esc(t('Allow sellers to change the owner on a lead'))+'</span><div class="switch '+(DB.allowOverride?'on':'')+'" id="ovr"></div></div></div>';
-
-    const ruleForm = (r) => {
-      const countries = DB.countries;
-      const segs = pick('interesse').map(v=>v.value);
-      const selC = (r && r.countries) || [], selI = (r && r.interests) || [];
-      return '<h3>'+esc(r?t('Edit rule'):t('New rule'))+'</h3>' +
-        '<p class="hint">'+esc(t('Pick one or more values. Leave a list empty to match anything.'))+'</p>' +
-        '<div class="field"><label>'+esc(t('Countries'))+'</label><select class="input" id="rCountries" multiple size="6">' +
-          countries.map(c=>'<option value="'+esc(c)+'" '+(selC.indexOf(c)>=0?'selected':'')+'>'+esc(tc(c))+'</option>').join('') + '</select></div>' +
-        '<div class="field"><label>'+esc(t('Segments'))+'</label><select class="input" id="rSegments" multiple size="'+Math.min(6,Math.max(3,segs.length||3))+'">' +
-          (segs.length? segs.map(s=>'<option value="'+esc(s)+'" '+(selI.indexOf(s)>=0?'selected':'')+'>'+esc(s)+'</option>').join('') : '<option disabled>'+esc(t('No segments defined yet'))+'</option>') + '</select></div>' +
-        '<div class="field"><label>'+esc(t('Assign to'))+' <span class="req">*</span></label><select class="input" id="rOwner">' +
-          sellers.map(u=>'<option value="'+u.id+'" '+(r&&r.owner===u.id?'selected':'')+'>'+esc(u.name||u.email)+'</option>').join('') + '</select></div>' +
-        '<button class="btn primary" id="rSave">'+esc(r?t('Save rule'):t('Add rule'))+'</button>' +
-        '<button class="btn ghost" onclick="closeModal()" style="margin-top:8px">'+esc(t('Cancel'))+'</button>';
-    };
-    const vals = id => Array.from(document.getElementById(id).selectedOptions).map(o=>o.value);
-
-    shell(t('Assignment rules'), tp('n_rules', rules.length), body, '#/admin', { back:'#/admin', bind(){
-      app.querySelectorAll('[data-r]').forEach(sw => sw.onclick = () => { const r=DB.assignmentRules.find(x=>x.id===sw.getAttribute('data-r')); r.active=!r.active; saveState(); push('PATCH','/rules/'+r.id,{active:r.active}); adminRules(); });
-      app.querySelectorAll('[data-up]').forEach(b => b.onclick = () => {
-        const id=b.getAttribute('data-up'); const arr=DB.assignmentRules.slice().sort((a,b2)=>a.priority-b2.priority);
-        const i=arr.findIndex(x=>x.id===id); if(i<=0) return;
-        const tmp=arr[i-1].priority; arr[i-1].priority=arr[i].priority; arr[i].priority=tmp;
-        saveState(); push('PATCH','/rules/'+arr[i-1].id,{priority:arr[i-1].priority}); push('PATCH','/rules/'+arr[i].id,{priority:arr[i].priority}); adminRules();
-      });
-      app.querySelectorAll('[data-delr]').forEach(b => b.onclick = () => {
-        const id=b.getAttribute('data-delr');
-        DB.assignmentRules = DB.assignmentRules.filter(x=>x.id!==id);
-        DB.assignmentRules.sort((a,b2)=>a.priority-b2.priority).forEach((r,i)=>r.priority=i+1);
-        saveState(); push('DELETE','/rules/'+id); toast(t('Rule deleted'),'ok'); adminRules();
-      });
-      app.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
-        const r = DB.assignmentRules.find(x=>x.id===b.getAttribute('data-edit'));
-        modal(ruleForm(r));
-        setTimeout(()=>{ const s=document.getElementById('rSave'); if(s) s.onclick=()=>{
-          r.countries=vals('rCountries'); r.interests=vals('rSegments'); r.owner=document.getElementById('rOwner').value;
-          saveState(); push('PATCH','/rules/'+r.id,{countries:r.countries,interests:r.interests,owner:r.owner}); closeModal(); toast(t('Rule saved'),'ok'); adminRules();
-        }; },0);
-      });
-      $('#newRule').onclick = () => {
-        if (!sellers.length) { toast(t('Add a user first'),'err'); return; }
-        modal(ruleForm(null));
-        setTimeout(()=>{ const s=document.getElementById('rSave'); if(s) s.onclick=()=>{
-          const nr={ id:'r'+Date.now(), priority:(DB.assignmentRules.length+1), countries:vals('rCountries'), interests:vals('rSegments'), owner:document.getElementById('rOwner').value, active:true };
-          if(!nr.countries.length && !nr.interests.length){ toast(t('Pick at least one country or segment'),'err'); return; }
-          push('POST','/rules',{countries:nr.countries,interests:nr.interests,owner:nr.owner,priority:nr.priority})
-            .then(r=>{ DB.assignmentRules.push(r.rule); saveState(); closeModal(); toast(t('Rule added'),'ok'); adminRules(); }).catch(()=>{});
-        }; },0);
-      };
-      $('#fallback').onchange = () => { DB.fallbackOwner = $('#fallback').value; saveState(); push('PATCH','/settings',{fallbackOwner:DB.fallbackOwner}); toast(t('Default owner updated'),'ok'); };
-      $('#ovr').onclick = () => { DB.allowOverride=!DB.allowOverride; saveState(); push('PATCH','/settings',{allowOverride:DB.allowOverride}); toast(t('Override')+' · '+(DB.allowOverride?t('enabled'):t('disabled')),'ok'); adminRules(); };
     }});
   }
 
@@ -1268,6 +1388,26 @@
     };
   }
 
+  /* Which Brevo list people land in when they tick the newsletter box. Leaving
+     it unset means nobody is ever subscribed by accident. */
+  function newsletterCard() {
+    const lists = brevoLists || [];
+    const cur = DB.newsletterListId || '';
+    return '<div class="card"><h3>' + esc(t('Newsletter')) + '</h3>' +
+      '<p class="hint">' + esc(I18N.lang === 'it'
+        ? 'Chi spunta la casella accanto alla firma viene iscritto a questa lista, oltre a quella della sessione. Se non ne scegli nessuna, resta solo l\'attributo sul contatto e nessuno viene iscritto.'
+        : 'People who tick the box next to the signature are added to this list, on top of the session list. Leave it unset and only the contact attribute is written — nobody gets subscribed.') + '</p>' +
+      (!DB.brevoApiKey
+        ? '<p class="hint" style="margin:0">' + esc(I18N.lang === 'it' ? 'Serve prima la chiave Brevo.' : 'Add the Brevo key first.') + '</p>'
+        : !lists.length
+          ? '<p class="hint" style="margin:0">' + esc(t('Loading your Brevo lists…')) + '</p>'
+          : '<div class="field" style="margin-bottom:0"><label>' + esc(t('Newsletter list')) + '</label>' +
+            '<select class="input" id="newsList"><option value="">' + esc(t('— none —')) + '</option>' +
+            lists.map(l => '<option value="' + l.id + '" ' + (cur === l.id ? 'selected' : '') + '>' + esc(l.name) + ' (#' + l.id + ')</option>').join('') +
+            '</select></div>') +
+      '</div>';
+  }
+
   function adminDest() {
     const m = DB.ms || {};
     const msLive = m.enabled && m.ready;
@@ -1288,10 +1428,17 @@
       '<div class="card"><h3>'+esc(t('Sending & consent'))+'</h3>' +
         '<div class="kv"><span class="k">'+esc(t('Auto-send when lead is Ready'))+'</span><div class="switch '+(DB.autoSend?'on':'')+'" id="auto"></div></div>' +
         '<div class="kv" style="border:none"><span class="k">'+esc(t('Require consent signature before sending'))+'</span><div class="switch '+(DB.requireConsent?'on':'')+'" id="reqConsent"></div></div></div>' +
+      newsletterCard() +
       '<div class="card"><h3>'+esc(t('Brevo attributes'))+'</h3><p class="hint">'+esc(I18N.lang === 'it' ? 'Crea nel tuo account Brevo i campi contatto su cui Bizca scrive (nome, azienda, provenienza, paese, segmento, evento, titolare, consenso…). Da lanciare una volta sola per account.' : 'Create the contact fields Bizca maps to (name, company, source, country, interest, event, owner, consent…) in your Brevo account. Run once per account.')+'</p><button class="btn soft" id="brevoSetup">'+esc(t('Prepare Brevo attributes'))+'</button></div>' +
       '<div class="banner">'+ic.info+'<div>'+esc(I18N.lang === 'it' ? 'I lead finiscono nella lista Brevo impostata per ogni evento (Admin → Eventi) e vengono aggiunti alla tabella Excel condivisa quando la destinazione Microsoft è attiva.' : 'Leads route into the Brevo list set per event (Admin → Events), and are appended to the shared Excel table when the Microsoft destination is on.')+'</div></div>';
     shell(t('Destinations'), 'Brevo + Excel', body, null, { back:'#/admin', bind(){
       bindMsCard();
+      if (DB.brevoApiKey && !brevoLists) loadBrevoLists().then(r => { if (r && location.hash.indexOf('#/admin/dest') === 0) adminDest(); });
+      const nl = $('#newsList'); if (nl) nl.onchange = () => {
+        DB.newsletterListId = nl.value ? parseInt(nl.value, 10) : null;
+        saveState(); push('PATCH','/settings',{ newsletterListId: DB.newsletterListId });
+        toast(t('Newsletter list updated'),'ok');
+      };
       $('#auto').onclick = () => { DB.autoSend=!DB.autoSend; saveState(); push('PATCH','/settings',{autoSend:DB.autoSend}); toast(t('Auto-send when lead is Ready')+' · '+(DB.autoSend?t('enabled'):t('disabled')),'ok'); adminDest(); };
       $('#reqConsent').onclick = () => { DB.requireConsent=!DB.requireConsent; saveState(); push('PATCH','/settings',{requireConsent:DB.requireConsent}); toast(t('Consent')+' · '+(DB.requireConsent?(I18N.lang === 'it' ? 'obbligatorio' : 'required'):(I18N.lang === 'it' ? 'facoltativo' : 'optional')),'ok'); adminDest(); };
       const ks = $('#brevoKeySave'); if (ks) ks.onclick = () => { const v=($('#brevoKey').value||'').trim(); if(!v){toast(t('Enter a key'),'err');return;} DB.brevoApiKey=v; brevoLists=null; saveState(); push('PATCH','/settings',{brevoApiKey:v}); toast(t('Brevo key saved'),'ok'); adminDest(); };
@@ -1379,6 +1526,8 @@
     const [path, query] = raw.split('?');
     const params = {}; if (query) query.split('&').forEach(p => { const [k,v]=p.split('='); params[k]=decodeURIComponent(v); });
     // Unconfigured install → welcome screen (sign in or register a company)
+    // The invitation link arrives on a device that knows nothing yet: handle it first.
+    if (path === '#/activate' && !S.user) { window.scrollTo(0,0); return activateScreen(params.email, params.token); }
     if (!DB.company.configured) {
       window.scrollTo(0,0);
       if (path === '#/setup') return setupScreen();
@@ -1386,7 +1535,7 @@
       if (path !== '#/welcome') return go('#/welcome');
       return welcomeScreen();
     }
-    if (path === '#/setup' || path === '#/welcome') return go(S.user ? '#/home' : '#/login');
+    if (path === '#/setup' || path === '#/welcome' || path === '#/activate') return go(S.user ? '#/home' : '#/login');
     if (path !== '#/login' && !S.user) return go('#/login');
     window.scrollTo(0,0);
     switch (path) {
@@ -1401,7 +1550,6 @@
       case '#/admin/team': return adminTeam();
       case '#/admin/sources': return adminPickList('provenienza');
       case '#/admin/segments': return adminPickList('interesse');
-      case '#/admin/rules': return adminRules();
       case '#/admin/dest': return adminDest();
       case '#/admin/events': return adminEvents();
       default: return go('#/home');
@@ -1414,6 +1562,24 @@
   (async function start() {
     loadState();                       // offline cache first, so something shows instantly
     applyLang();                       // before the first render, so nothing flashes in English
+
+    // Coming back from Microsoft sign-in
+    const msCode = (location.hash.match(/[?&]ms=([^&]+)/) || [])[1];
+    const msErr = (location.hash.match(/[?&]mserror=([^&]+)/) || [])[1];
+    if (msErr) { location.hash = '#/login'; toast(decodeURIComponent(msErr), 'err'); }
+    else if (msCode) {
+      location.hash = '#/login';
+      try {
+        const d = await api('POST', '/auth/microsoft/exchange', { code: decodeURIComponent(msCode) });
+        setToken(d.token);
+        await pullState();
+        toast(t('Signed in with Microsoft'), 'ok');
+        location.hash = '#/home';
+        render();
+        window.addEventListener('online', () => { if (getToken()) pullState().then(() => render()).catch(() => {}); });
+        return;
+      } catch (e) { toast(e.message, 'err'); }
+    }
 
     // Coming back from the email confirmation link
     if (/[?&]verified=1/.test(location.hash)) { toast('Email confirmed — you can sign in now', 'ok'); location.hash = '#/login'; }
@@ -1430,7 +1596,9 @@
       }
     } else {
       S.user = null;
-      if (['#/setup', '#/login'].indexOf(location.hash) === -1) location.hash = DB.company.configured ? '#/login' : '#/welcome';
+      // Compare the path only: the activation link carries email and token in the query.
+      const path = (location.hash || '').split('?')[0];
+      if (['#/setup', '#/login', '#/activate'].indexOf(path) === -1) location.hash = DB.company.configured ? '#/login' : '#/welcome';
     }
     render();
     // Refresh from the server when the connection comes back

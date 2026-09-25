@@ -10,6 +10,7 @@ const path = require('path');
 const { Pool } = require('pg');
 const ms = require('./ms');
 const emails = require('./emails');
+const msauth = require('./msauth');
 
 const PORT = process.env.PORT || 3000;
 const APP_URL = (process.env.APP_URL || 'https://bizca.vercel.app').replace(/\/$/, '');
@@ -22,8 +23,8 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-11-i18n1';
-const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n'];
+const BUILD = '2026-09-25-capture2';
+const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -87,12 +88,22 @@ async function sendEmail(to, subject, html) {
   return { ok: true };
 }
 
+/* The token proves who you are; the role and the company come from the database
+   on every request. So promoting or disabling someone takes effect at once,
+   without waiting for their token to expire. */
 function auth(req, res, next) {
   const h = req.headers.authorization || '';
   const p = verifyToken(h.replace(/^Bearer\s+/i, ''));
   if (!p) return res.status(401).json({ error: 'Not signed in' });
-  req.session = p;
-  next();
+  pool.query('SELECT id,company_id,role,status FROM users WHERE id=$1', [p.uid])
+    .then(r => {
+      if (!r.rowCount) return res.status(401).json({ error: 'Account no longer exists' });
+      const u = r.rows[0];
+      if (u.status !== 'active') return res.status(403).json({ error: 'This account is disabled' });
+      req.session = { uid: u.id, cid: u.company_id, role: u.role };
+      next();
+    })
+    .catch(e => { console.error(e); res.status(500).json({ error: 'Server error' }); });
 }
 const requireAdmin = (req, res, next) => req.session.role === 'admin' ? next() : res.status(403).json({ error: 'Admin only' });
 const wrap = fn => (req, res) => fn(req, res).catch(e => { console.error(e); res.status(500).json({ error: e.message || 'Server error' }); });
@@ -112,9 +123,11 @@ const outLead = r => ({
   provenienza: r.source, country: r.country, interesse: r.segment,
   status: r.status, override: r.override_flag, error: r.error, image: r.card_image,
   consentAt: r.consent_at ? new Date(r.consent_at).getTime() : null, consentSignature: r.consent_sig,
+  newsletter: !!r.newsletter, captureType: r.capture_type || null, brevoListId: r.brevo_list_id,
   ts: new Date(r.captured_at).getTime()
 });
-const outUser = r => ({ id: r.id, name: r.name, email: r.email, role: r.role, status: r.status, verified: r.email_verified });
+const outUser = r => ({ id: r.id, name: r.name, email: r.email, role: r.role, status: r.status,
+  verified: r.email_verified, activated: !!r.password_hash || !!r.email_verified });
 const outEvent = r => ({
   id: r.id, name: r.name, startDate: r.start_date ? new Date(r.start_date).toISOString().slice(0, 10) : '',
   endDate: r.end_date ? new Date(r.end_date).toISOString().slice(0, 10) : '',
@@ -216,14 +229,26 @@ app.post('/auth/google', wrap(async (req, res) => {
   res.json({ ok: true, token: session(u), user: outUser(Object.assign({}, u, { email_verified: true, name: u.name || d.name || '' })) });
 }));
 
-// Set a password (used when an invited user activates their account)
+// Activate an invited account: set the password and sign in immediately.
 app.post('/auth/set-password', wrap(async (req, res) => {
-  const { email, token, password } = req.body || {};
+  const { email, token, password, name, locale } = req.body || {};
   if (!password || String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
   const r = await pool.query('SELECT * FROM users WHERE lower(email)=lower($1) AND verify_token=$2', [email || '', token || '']);
-  if (!r.rowCount) return res.status(400).json({ error: 'Invalid or expired link' });
-  await pool.query('UPDATE users SET password_hash=$1, email_verified=true, verify_token=NULL WHERE id=$2', [hashPassword(password), r.rows[0].id]);
-  res.json({ ok: true });
+  if (!r.rowCount) {
+    // Tell apart "already used" from "never existed": the first has a friendly way out.
+    const known = await pool.query('SELECT password_hash FROM users WHERE lower(email)=lower($1)', [email || '']);
+    if (known.rowCount && known.rows[0].password_hash) {
+      return res.status(409).json({ error: 'This invitation has already been used — sign in with your password', alreadyActive: true });
+    }
+    return res.status(400).json({ error: 'This invitation link is not valid any more — ask your admin to send it again' });
+  }
+  const u = r.rows[0];
+  await pool.query(
+    'UPDATE users SET password_hash=$1, email_verified=true, verify_token=NULL, name=COALESCE(NULLIF($2,\'\'),name), locale=COALESCE($3,locale) WHERE id=$4',
+    [hashPassword(password), (name || '').trim(), locale ? emails.pick(locale) : null, u.id]
+  );
+  const fresh = await pool.query('SELECT * FROM users WHERE id=$1', [u.id]);
+  res.json({ ok: true, token: session(fresh.rows[0]), user: outUser(fresh.rows[0]) });
 }));
 
 /* ================= WORKSPACE ================= */
@@ -246,7 +271,7 @@ app.get('/state', auth, wrap(async (req, res) => {
   const s = c.settings || {};
   res.json({
     company: { id: c.id, name: c.name, domain: c.domain, locale: c.locale || 'en', configured: true },
-    settings: { autoSend: s.autoSend !== false, requireConsent: !!s.requireConsent, allowOverride: s.allowOverride !== false, brevoApiKey: s.brevoApiKey || '', fallbackOwner: s.fallbackOwner || null },
+    settings: { autoSend: s.autoSend !== false, requireConsent: !!s.requireConsent, allowOverride: s.allowOverride !== false, brevoApiKey: s.brevoApiKey || '', fallbackOwner: s.fallbackOwner || null, newsletterListId: s.newsletterListId || null },
     // Microsoft/Excel config is admin-only, and never carries the client secret
     ms: req.session.role === 'admin' ? ms.publicCfg(s) : { enabled: !!(s.ms && s.ms.enabled) },
     users: users.rows.map(outUser),
@@ -301,6 +326,22 @@ app.post('/users', auth, requireAdmin, wrap(async (req, res) => {
   await sendEmail(email, msg.subject, msg.html);
   const r = await pool.query('SELECT * FROM users WHERE id=$1', [uid]);
   res.json({ ok: true, user: outUser(r.rows[0]) });
+}));
+
+// Send the invitation again — the previous link stops working.
+app.post('/users/:uid/resend', auth, requireAdmin, wrap(async (req, res) => {
+  const r = await pool.query('SELECT * FROM users WHERE id=$1 AND company_id=$2', [req.params.uid, req.session.cid]);
+  if (!r.rowCount) return res.status(404).json({ error: 'User not found' });
+  const u = r.rows[0];
+  if (u.password_hash) return res.status(400).json({ error: 'That user has already activated their account' });
+  const token = crypto.randomBytes(24).toString('hex');
+  await pool.query('UPDATE users SET verify_token=$1, verify_sent_at=now() WHERE id=$2', [token, u.id]);
+  const co = await pool.query('SELECT name,locale FROM companies WHERE id=$1', [req.session.cid]);
+  const lang = emails.pick(u.locale || co.rows[0].locale);
+  const link = APP_URL + '/#/activate?email=' + encodeURIComponent(u.email) + '&token=' + token;
+  const msg = emails.build('invite', lang, { company: co.rows[0].name, link });
+  const mail = await sendEmail(u.email, msg.subject, msg.html);
+  res.json({ ok: true, emailSent: !!mail.ok, emailError: mail.ok ? null : (mail.error || 'Email not configured') });
 }));
 
 app.patch('/users/:uid', auth, requireAdmin, wrap(async (req, res) => {
@@ -400,17 +441,20 @@ app.put('/leads/:lid', auth, wrap(async (req, res) => {
     return res.status(403).json({ error: 'Not your lead' });
   }
   await pool.query(
-    `INSERT INTO leads (id,company_id,event_id,owner_id,created_by,first_name,last_name,company_name,role_title,email,phone,website,address,source,country,segment,status,override_flag,error,card_image,consent_at,consent_sig,captured_at,updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,to_timestamp($23/1000.0),now())
+    `INSERT INTO leads (id,company_id,event_id,owner_id,created_by,first_name,last_name,company_name,role_title,email,phone,website,address,source,country,segment,status,override_flag,error,card_image,consent_at,consent_sig,newsletter,capture_type,brevo_list_id,captured_at,updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,to_timestamp($26/1000.0),now())
      ON CONFLICT (id) DO UPDATE SET event_id=EXCLUDED.event_id, owner_id=EXCLUDED.owner_id, first_name=EXCLUDED.first_name,
        last_name=EXCLUDED.last_name, company_name=EXCLUDED.company_name, role_title=EXCLUDED.role_title, email=EXCLUDED.email,
        phone=EXCLUDED.phone, website=EXCLUDED.website, address=EXCLUDED.address, source=EXCLUDED.source, country=EXCLUDED.country,
        segment=EXCLUDED.segment, status=EXCLUDED.status, override_flag=EXCLUDED.override_flag, error=EXCLUDED.error,
-       card_image=EXCLUDED.card_image, consent_at=EXCLUDED.consent_at, consent_sig=EXCLUDED.consent_sig, updated_at=now()`,
+       card_image=EXCLUDED.card_image, consent_at=EXCLUDED.consent_at, consent_sig=EXCLUDED.consent_sig,
+       newsletter=EXCLUDED.newsletter, capture_type=EXCLUDED.capture_type, brevo_list_id=EXCLUDED.brevo_list_id, updated_at=now()`,
     [req.params.lid, cid, l.eventId || null, l.ownerId || null, l.createdBy || req.session.uid,
      l.first || '', l.last || '', l.company || '', l.role || '', l.email || '', l.phone || '', l.website || '', l.address || '',
      l.provenienza || '', l.country || '', l.interesse || '', l.status || 'To finalize', !!l.override, l.error || null,
-     l.image || null, l.consentAt ? new Date(l.consentAt) : null, l.consentSignature || null, l.ts || Date.now()]
+     l.image || null, l.consentAt ? new Date(l.consentAt) : null, l.consentSignature || null,
+     !!l.newsletter, l.captureType || null, Number.isFinite(parseInt(l.brevoListId, 10)) ? parseInt(l.brevoListId, 10) : null,
+     l.ts || Date.now()]
   );
   res.json({ ok: true });
 }));
@@ -430,6 +474,9 @@ app.post('/sync-log', auth, wrap(async (req, res) => {
 
 /* ---------- Microsoft 365 / Excel on SharePoint ---------- */
 ms.mount(app, { pool, auth, requireAdmin, wrap, sign, verifyToken, APP_URL, API_URL });
+
+/* ---------- Sign in with a Microsoft work account ---------- */
+msauth.mount(app, { pool, ms, sign, verifyToken, session, outUser, APP_URL, API_URL });
 
 /* ---------- email self-test (safe: reveals no secrets) ---------- */
 app.get('/email-status', wrap(async (req, res) => {
