@@ -112,3 +112,27 @@ CREATE TABLE IF NOT EXISTS sync_log (
   ts         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sync_log_company_idx ON sync_log (company_id, ts DESC);
+
+-- Workspaces can be suspended by a Bryan superadmin: their users can no longer sign in.
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+-- Superadmin magic links: stored hashed, one use, short-lived.
+CREATE TABLE IF NOT EXISTS superadmin_links (
+  token_hash TEXT PRIMARY KEY,
+  email      TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at    TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS superadmin_links_email_idx ON superadmin_links (email, created_at DESC);
+
+-- Everything a superadmin changes, and every superadmin sign-in.
+CREATE TABLE IF NOT EXISTS super_audit (
+  id     BIGSERIAL PRIMARY KEY,
+  actor  TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target TEXT,
+  detail JSONB,
+  at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS super_audit_at_idx ON super_audit (at DESC);

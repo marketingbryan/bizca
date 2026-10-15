@@ -24,7 +24,7 @@ function fakeDb() {
     connect: async () => ({ query: (...a) => pool.query(...a), release() {} }),
     query: async (sql, p=[]) => {
       const one = rows => ({ rowCount: rows.length, rows });
-      if (/SELECT id,company_id,role,status FROM users WHERE id=\$1/.test(sql)) return one(users.filter(u => u.id === p[0]));
+      if (/FROM users u JOIN companies c ON c.id=u.company_id WHERE u.id=\$1/.test(sql)) return one(users.filter(u => u.id === p[0]));
       if (/SELECT created_by, owner_id FROM leads WHERE id=\$1 AND company_id=\$2/.test(sql))
         return one(leads.filter(l => l.id === p[0] && l.company_id === p[1]));
       if (/SELECT 1 FROM users WHERE id=\$1 AND company_id=\$2/.test(sql)) return one(users.filter(u => u.id === p[0] && u.company_id === p[1]));

@@ -21,6 +21,11 @@
     let data = {};
     try { data = await res.json(); } catch (e) {}
     if (res.status === 401) { setToken(''); S.user = null; }
+    // A workspace suspended by Bryan: sign out on this device too.
+    if (res.status === 403 && data.suspended) {
+      setToken(''); S.user = null;
+      data.error = I18N.lang === 'it' ? 'Lo spazio di lavoro è sospeso: contatta Bryan.' : 'This workspace is suspended — contact Bryan.';
+    }
     if (!res.ok) { const err = new Error(data.error || ('Request failed (' + res.status + ')')); err.status = res.status; err.data = data; throw err; }
     return data;
   }
@@ -1874,7 +1879,7 @@
         await pullState();             // server is the source of truth
         if (!location.hash || ['#/login', '#/', '#/setup', '#/welcome'].indexOf(location.hash) >= 0) location.hash = '#/home';
       } catch (e) {
-        if (e.status === 401) { setToken(''); S.user = null; location.hash = '#/login'; }
+        if (e.status === 401 || (e.data && e.data.suspended)) { setToken(''); S.user = null; location.hash = '#/login'; if (e.data && e.data.suspended) setTimeout(() => toast(e.message, 'err'), 300); }
         else if (!DB.company.configured) location.hash = '#/welcome';
         // Offline with a saved session: open the cached workspace, not the sign-in
         // screen — signing in needs the network, capturing cards does not.

@@ -11,6 +11,7 @@ const { Pool } = require('pg');
 const ms = require('./ms');
 const emails = require('./emails');
 const msauth = require('./msauth');
+const superadmin = require('./superadmin');
 
 const PORT = process.env.PORT || 3000;
 const APP_URL = (process.env.APP_URL || 'https://bizca.vercel.app').replace(/\/$/, '');
@@ -25,8 +26,8 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-09-25-bulk1';
-const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth'];
+const BUILD = '2026-10-15-super1';
+const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth', 'super'];
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -103,11 +104,13 @@ function auth(req, res, next) {
   // admin consent) are signed with the same key but always carry a purpose "k":
   // they must never be accepted here, or anyone could turn one into a login.
   if (!p || p.k || !p.uid) return res.status(401).json({ error: 'Not signed in' });
-  pool.query('SELECT id,company_id,role,status FROM users WHERE id=$1', [p.uid])
+  pool.query('SELECT u.id,u.company_id,u.role,u.status,c.status AS company_status FROM users u JOIN companies c ON c.id=u.company_id WHERE u.id=$1', [p.uid])
     .then(r => {
       if (!r.rowCount) return res.status(401).json({ error: 'Account no longer exists' });
       const u = r.rows[0];
       if (u.status !== 'active') return res.status(403).json({ error: 'This account is disabled' });
+      // A workspace suspended by Bryan closes for everybody in it, at once.
+      if (u.company_status === 'suspended') return res.status(403).json({ error: 'This workspace is suspended — contact Bryan', suspended: true });
       req.session = { uid: u.id, cid: u.company_id, role: u.role };
       next();
     })
@@ -219,6 +222,8 @@ app.post('/auth/login', wrap(async (req, res) => {
   if (u.status !== 'active') return res.status(403).json({ error: 'This account is disabled' });
   if (!u.password_hash || !(await checkPassword(password || '', u.password_hash))) return res.status(401).json({ error: 'Wrong email or password' });
   if (!u.email_verified) return res.status(403).json({ error: 'Please confirm your email first', needsVerification: true });
+  const cs = await pool.query('SELECT status FROM companies WHERE id=$1', [u.company_id]);
+  if (cs.rowCount && cs.rows[0].status === 'suspended') return res.status(403).json({ error: 'This workspace is suspended — contact Bryan', suspended: true });
   res.json({ ok: true, token: session(u), user: outUser(u) });
 }));
 
@@ -568,6 +573,7 @@ ms.mount(app, { pool, auth, requireAdmin, wrap, sign, verifyToken, APP_URL, API_
 
 /* ---------- Sign in with a Microsoft work account ---------- */
 msauth.mount(app, { pool, ms, sign, verifyToken, session, outUser, APP_URL, API_URL });
+superadmin.mount(app, { pool, ms, sign, verifyToken, sendEmail, emails, APP_URL, id, isEmail });
 
 /* ---------- token check for the Vercel functions ---------- */
 // api/scan proxies OpenAI at our cost: it asks here before doing any work.

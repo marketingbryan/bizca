@@ -19,7 +19,7 @@ function fakeDb() {
     connect: async () => ({ query: (...a) => pool.query(...a), release() {} }),
     query: async (sql, p = []) => {
       const one = rows => ({ rowCount: rows.length, rows });
-      if (/SELECT id,company_id,role,status FROM users WHERE id=\$1/.test(sql))
+      if (/FROM users u JOIN companies c ON c.id=u.company_id WHERE u.id=\$1/.test(sql))
         return one(users.filter(u => u.id === p[0]).map(u => ({ id: u.id, company_id: u.company_id, role: u.role, status: u.status })));
       if (/SELECT \* FROM users WHERE lower\(email\)=lower\(\$1\) AND verify_token=\$2/.test(sql))
         return one(users.filter(u => u.email.toLowerCase() === String(p[0]).toLowerCase() && u.verify_token === p[1]));

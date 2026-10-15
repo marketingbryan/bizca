@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#0284C7">
+  <title>Bizca — Superadmin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap">
+  <link rel="icon" href="favicon.png">
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    /* The console is a desktop tool: wide layout, same design system as the app. */
+    body{background:var(--bg)}
+    #sa{max-width:1180px;margin:0 auto;padding:0 24px 80px}
+    .sa-top{position:sticky;top:0;z-index:20;background:rgba(241,245,249,.9);backdrop-filter:blur(8px);display:flex;align-items:center;gap:14px;padding:18px 0;border-bottom:1px solid var(--line);margin-bottom:22px}
+    .sa-top img{width:38px;height:38px;border-radius:11px}
+    .sa-top .t{font-weight:800;font-size:20px;letter-spacing:-.01em}
+    .sa-top .s{font-size:13px;color:var(--muted)}
+    .sa-top .sp{flex:1}
+    .badge-sa{background:#0F172A;color:#fff;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:4px 9px;border-radius:999px}
+    .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+    .tile{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:16px 18px;box-shadow:var(--shadow)}
+    .tile .n{font-size:30px;font-weight:800;line-height:1;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+    .tile .l{font-size:13px;color:var(--muted);margin-top:6px}
+    .sa-bar{display:flex;gap:12px;align-items:center;margin-bottom:14px}
+    .sa-bar .input{max-width:360px}
+    table.sa{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow)}
+    table.sa th{text-align:left;font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:12px 14px;background:var(--surface-2);border-bottom:1px solid var(--line)}
+    table.sa td{padding:13px 14px;border-bottom:1px solid #F1F5F9;font-size:14px;vertical-align:middle}
+    table.sa tr:last-child td{border-bottom:none}
+    table.sa tbody tr.click{cursor:pointer}
+    table.sa tbody tr.click:hover td{background:#F8FAFC}
+    .muted{color:var(--muted)} .num{font-variant-numeric:tabular-nums}
+    .nm{font-weight:700} .sub{font-size:12px;color:var(--muted)}
+    .tags{display:flex;gap:6px;flex-wrap:wrap}
+    .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+    .acts .pill{border:none;cursor:pointer}
+    .drawer-bg{position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:50;display:flex;justify-content:flex-end}
+    .drawer{width:min(760px,100%);height:100%;overflow:auto;background:var(--bg);box-shadow:-20px 0 60px rgba(15,23,42,.2);padding:24px 26px 60px;animation:slin .22s ease}
+    @keyframes slin{from{transform:translateX(40px);opacity:0}to{transform:none;opacity:1}}
+    .dhead{display:flex;align-items:flex-start;gap:12px;margin-bottom:16px}
+    .dhead h2{margin:0;font-size:24px} .dhead .sp{flex:1}
+    .x{width:38px;height:38px;border-radius:10px;background:var(--surface);border:1px solid var(--line);font-size:20px;color:var(--slate)}
+    .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+    .linkbox{display:flex;gap:8px;margin:10px 0}
+    .linkbox .input{font-size:13px;font-family:ui-monospace,Menlo,monospace}
+    .audit .row{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #F1F5F9;font-size:13px}
+    .audit .row:last-child{border:none}
+    .audit .when{width:130px;color:var(--muted);flex:none}
+    .danger-zone{border:1px solid #FECACA;background:#FEF2F2}
+    .login-sa{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+      background:radial-gradient(1200px 600px at 50% -10%,rgba(2,132,199,.14),transparent),var(--bg)}
+    .login-sa .card{width:100%;max-width:420px;box-shadow:var(--shadow-lg)}
+    .modal-bg{position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:60;display:flex;align-items:center;justify-content:center;padding:20px}
+    .modal-sa{background:var(--surface);border-radius:18px;padding:22px;width:min(520px,100%);box-shadow:var(--shadow-lg)}
+    .modal-sa h3{margin:0 0 6px}
+    .chk{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--slate);margin:6px 0 14px}
+    .chk input{width:18px;height:18px;accent-color:var(--indigo)}
+    @media (max-width:820px){ #sa{padding:0 14px 60px} .tiles{grid-template-columns:repeat(2,1fr)} .hide-s{display:none} .grid3{grid-template-columns:1fr} .badge-sa{display:none} .sa-top .t{font-size:17px} .audit .when{width:90px} .drawer{padding:18px 14px 50px} }
+  </style>
+</head>
+<body>
+  <div id="sa"></div>
+  <div id="modal-root"></div>
+  <div id="toast"></div>
+  <script src="super.js"></script>
+</body>
+</html>

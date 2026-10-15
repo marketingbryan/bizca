@@ -72,6 +72,26 @@ const T = {
         '<p><a href="' + o.link + '" style="' + BTN + '">Attiva il mio account</a></p>' +
         '<p style="' + MUTED + '">Bizca trasforma i biglietti da visita raccolti in fiera in lead qualificati dentro al tuo CRM.</p></div>'
     })
+  },
+
+  // Bryan's own console: only ever sent to the superadmin allowlist.
+  superlink: {
+    en: (o) => ({
+      subject: 'Your Bizca superadmin access link',
+      html:
+        '<div style="' + WRAP + '">' +
+        '<p>Here is your link to the Bizca superadmin console. It works once and expires in 15 minutes.</p>' +
+        '<p><a href="' + o.link + '" style="' + BTN + '">Open the console</a></p>' +
+        '<p style="' + MUTED + '">If you did not ask for it, ignore this email: without the link nobody can get in.</p></div>'
+    }),
+    it: (o) => ({
+      subject: 'Il tuo link di accesso al superadmin Bizca',
+      html:
+        '<div style="' + WRAP + '">' +
+        '<p>Ecco il link per entrare nella console superadmin di Bizca. Vale una sola volta e scade tra 15 minuti.</p>' +
+        '<p><a href="' + o.link + '" style="' + BTN + '">Apri la console</a></p>' +
+        '<p style="' + MUTED + '">Se non l\'hai chiesto tu, ignora pure questa email: senza il link non entra nessuno.</p></div>'
+    })
   }
 };
 
