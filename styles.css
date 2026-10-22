@@ -172,3 +172,11 @@ select.input{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg 
   background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg)}
 .selbar .btn{flex:1;white-space:nowrap}
 .selbar .btn:disabled{opacity:.45}
+
+/* Superadmin using the app as someone else: always visible, above the top bar */
+.impbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:10px;height:44px;overflow:hidden;padding:0 12px;
+  background:#0F172A;color:#fff;font-size:12.5px;line-height:1.3}
+.impbar span{flex:1}
+.impbar b{color:#67E8F9}
+.impbar button{background:#fff;color:#0F172A;font-weight:700;font-size:12px;padding:6px 12px;border-radius:999px}
+body.imp .topbar{top:44px}

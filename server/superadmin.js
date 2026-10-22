@@ -23,6 +23,8 @@ const crypto = require('crypto');
 
 const LINK_TTL = 15 * 60 * 1000;
 const SESSION_TTL = 8 * 3600 * 1000;
+const IMP_TTL = 2 * 3600 * 1000;
+const impHandoff = new Map();
 const DEFAULT_SUPERS = 'max@bryan.it,davide.berardino@bryan.it';
 
 const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -245,6 +247,30 @@ function mount(app, deps) {
     res.json({ ok: true, link, reset, emailSent: mail ? !!mail.ok : null, emailError: mail && !mail.ok ? (mail.error || 'Email non configurata') : null });
   }));
 
+  /* Open the app as this user, to see exactly what they see.
+     The console gets a one-time code (60 s); the app tab trades it for a session
+     token that carries imp:<superadmin email>. That session lasts 2 hours, stops
+     the moment the address leaves SUPERADMIN_EMAILS, and every change made with
+     it is written to super_audit. The code, not the token, travels in the URL. */
+  app.post('/super/users/:uid/impersonate', superAuth, wrap(async (req, res) => {
+    const u = await loadUser(req.params.uid);
+    if (!u) return res.status(404).json({ error: 'Utente non trovato' });
+    const token = sign({ uid: u.id, cid: u.company_id, role: u.role, imp: req.superEmail, exp: Date.now() + IMP_TTL });
+    const code = crypto.randomBytes(24).toString('hex');
+    impHandoff.set(sha(code), { token, exp: Date.now() + 60 * 1000 });
+    audit(req, 'user.impersonate', u.id, { email: u.email, company: u.company_id });
+    res.json({ ok: true, url: APP_URL + '/#/login?imp=' + code });
+  }));
+  app.post('/auth/impersonate', wrap(async (req, res) => {
+    const now = Date.now();
+    for (const [k, v] of impHandoff) if (v.exp <= now) impHandoff.delete(k);
+    const key = sha(String((req.body || {}).code || ''));
+    const hit = impHandoff.get(key);
+    impHandoff.delete(key);                       // single use
+    if (!hit || hit.exp <= now) return res.status(400).json({ error: 'Link scaduto — riaprilo dalla console superadmin' });
+    res.json({ ok: true, token: hit.token });
+  }));
+
   // Remove a user. Their leads move to another active admin of the same company.
   app.delete('/super/users/:uid', superAuth, wrap(async (req, res) => {
     const u = await loadUser(req.params.uid);
@@ -266,4 +292,4 @@ function mount(app, deps) {
   }));
 }
 
-module.exports = { mount, _internals: { isSuper, allowlist, sha } };
+module.exports = { mount, isSuper, _internals: { isSuper, allowlist, sha, impHandoff } };

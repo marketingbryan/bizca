@@ -101,7 +101,7 @@
       ).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:30px">Nessuna azienda</td></tr>') +
       '</tbody></table>' +
       '<div class="section-title" style="margin-top:28px">Attività recenti</div>' +
-      '<div class="card audit">' + (data.audit.length ? data.audit.map(a =>
+      '<div class="card audit">' + (data.audit.length ? groupAudit(data.audit).map(a =>
         '<div class="row"><div class="when">' + fmtWhen(a.at) + '</div><div style="flex:1"><b>' + esc(a.actor) + '</b> · ' + esc(auditLabel(a)) + '</div></div>').join('')
         : '<p class="hint" style="margin:0">Ancora nulla.</p>') + '</div>';
     $('#reload').onclick = () => load().then(() => toast('Aggiornato', 'ok')).catch(() => {});
@@ -110,6 +110,16 @@
     const qi = $('#q');
     qi.oninput = () => { query = qi.value; const pos = qi.selectionStart; mainView(); const n = $('#q'); n.focus(); n.setSelectionRange(pos, pos); };
     root.querySelectorAll('[data-co]').forEach(r => r.onclick = () => openCompany(r.getAttribute('data-co')));
+  }
+  // Saves made while using the app as someone arrive one per request: fold the runs.
+  function groupAudit(list) {
+    const out = [];
+    list.forEach(a => {
+      const last = out[out.length - 1];
+      if (a.action === 'as-user' && last && last.action === 'as-user' && last.actor === a.actor && last.target === a.target) { last.n = (last.n || 1) + 1; return; }
+      out.push(Object.assign({}, a));
+    });
+    return out;
   }
   const tile = (n, l) => '<div class="tile"><div class="n num">' + n + '</div><div class="l">' + esc(l) + '</div></div>';
   function auditLabel(a) {
@@ -124,6 +134,8 @@
       'user.update': 'ha modificato ' + (d.email || 'un utente') + (d.role ? ' → ' + d.role : '') + (d.status ? ' → ' + (d.status === 'active' ? 'attivo' : 'disattivato') : ''),
       'user.invite-link': 'ha generato un link d\'invito per ' + (d.email || ''),
       'user.reset-link': 'ha generato un link per reimpostare la password di ' + (d.email || ''),
+      'user.impersonate': 'è entrato nell\'app come ' + (d.email || 'un utente'),
+      'as-user': (a.n > 1 ? a.n + ' modifiche' : 'una modifica') + ' fatte dall\'app come utente (' + (d.method || '') + ' ' + (d.path || '') + (a.n > 1 ? '…' : '') + ')',
       'user.delete': 'ha rimosso ' + (d.email || 'un utente') + (d.moved ? ' (' + d.moved + ' lead riassegnati)' : '')
     };
     return L[a.action] || a.action;
@@ -193,6 +205,7 @@
           '<div class="tags" style="margin-top:6px"><span class="pill ' + (u.role === 'admin' ? 'indigo' : 'gray') + '">' + (u.role === 'admin' ? 'Admin' : 'Commerciale') + '</span>' +
           (u.status !== 'active' ? '<span class="pill red">disattivato</span>' : '') + (!u.activated ? '<span class="pill amber">invito da accettare</span>' : '') + '</div></td>' +
         '<td><div class="acts">' +
+          '<button class="pill indigo" data-imp="' + u.id + '">Entra come</button>' +
           '<button class="pill blue" data-link="' + u.id + '">' + (u.activated ? 'Link reset password' : 'Link d\'invito') + '</button>' +
           '<button class="pill gray" data-role="' + u.id + '" data-to="' + (u.role === 'admin' ? 'seller' : 'admin') + '">' + (u.role === 'admin' ? 'Rendi commerciale' : 'Rendi admin') + '</button>' +
           '<button class="pill gray" data-st="' + u.id + '" data-to="' + (u.status === 'active' ? 'disabled' : 'active') + '">' + (u.status === 'active' ? 'Disattiva' : 'Riattiva') + '</button>' +
@@ -250,6 +263,23 @@
       $('#lkGo').onclick = async () => {
         try { const r = await api('POST', '/super/users/' + u.id + '/link', { sendEmail: $('#lkMail').checked }); showLink(r.reset ? 'Link per reimpostare la password' : 'Link d\'invito', r); refresh(); }
         catch (e) { toast(e.message, 'err'); }
+      };
+    });
+    host.querySelectorAll('[data-imp]').forEach(b => b.onclick = () => {
+      const u = d.users.find(x => x.id === b.getAttribute('data-imp'));
+      modal('<h3>Entrare come ' + esc(u.name || u.email) + '?</h3>' +
+        '<p class="hint">Si apre l\'app in una nuova scheda, con i permessi di ' + esc(u.email) + ' (' + (u.role === 'admin' ? 'admin' : 'commerciale') + ') in <b>' + esc(c.name) + '</b>. ' +
+        'Vedi esattamente quello che vede lui.</p>' +
+        '<div class="banner" style="background:#FFFBEB;border-color:#FDE68A;color:#92400E"><div>Ogni azione è reale: un lead inviato finisce nel Brevo e nell\'Excel del cliente. Le modifiche restano registrate a tuo nome.</div></div>' +
+        '<p class="hint" style="margin:10px 0 14px">La sessione dura 2 ore. Per uscire usa «Esci» nella barra scura in cima all\'app: torni al tuo account.</p>' +
+        '<div class="btnrow"><button class="btn ghost" onclick="closeModal()">Annulla</button><button class="btn primary" id="impGo">Apri l\'app</button></div>');
+      $('#impGo').onclick = async () => {
+        const w = window.open('about:blank', '_blank');   // opened now, so no popup blocker
+        try {
+          const r = await api('POST', '/super/users/' + u.id + '/impersonate', {});
+          if (w) { w.opener = null; w.location.href = r.url; } else location.href = r.url;
+          closeModal();
+        } catch (e) { if (w) w.close(); toast(e.message, 'err'); }
       };
     });
     host.querySelectorAll('[data-role]').forEach(b => b.onclick = async () => {

@@ -26,7 +26,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-10-15-super1';
+const BUILD = '2026-10-22-imp1';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth', 'super'];
 
 const pool = new Pool({
@@ -104,14 +104,25 @@ function auth(req, res, next) {
   // admin consent) are signed with the same key but always carry a purpose "k":
   // they must never be accepted here, or anyone could turn one into a login.
   if (!p || p.k || !p.uid) return res.status(401).json({ error: 'Not signed in' });
+  // A Bryan superadmin using the app as this user: valid only while that address
+  // is still in SUPERADMIN_EMAILS.
+  if (p.imp && !superadmin.isSuper(p.imp)) return res.status(401).json({ error: 'Not signed in' });
   pool.query('SELECT u.id,u.company_id,u.role,u.status,c.status AS company_status FROM users u JOIN companies c ON c.id=u.company_id WHERE u.id=$1', [p.uid])
     .then(r => {
       if (!r.rowCount) return res.status(401).json({ error: 'Account no longer exists' });
       const u = r.rows[0];
-      if (u.status !== 'active') return res.status(403).json({ error: 'This account is disabled' });
-      // A workspace suspended by Bryan closes for everybody in it, at once.
-      if (u.company_status === 'suspended') return res.status(403).json({ error: 'This workspace is suspended — contact Bryan', suspended: true });
-      req.session = { uid: u.id, cid: u.company_id, role: u.role };
+      // Support needs to look inside disabled accounts and suspended workspaces too.
+      if (!p.imp) {
+        if (u.status !== 'active') return res.status(403).json({ error: 'This account is disabled' });
+        // A workspace suspended by Bryan closes for everybody in it, at once.
+        if (u.company_status === 'suspended') return res.status(403).json({ error: 'This workspace is suspended — contact Bryan', suspended: true });
+      }
+      req.session = { uid: u.id, cid: u.company_id, role: u.role, imp: p.imp || null };
+      if (p.imp && req.method !== 'GET') {
+        pool.query('INSERT INTO super_audit (actor,action,target,detail) VALUES ($1,$2,$3,$4)',
+          [String(p.imp).toLowerCase(), 'as-user', u.id, JSON.stringify({ method: req.method, path: (req.originalUrl || req.url || '').split('?')[0] })])
+          .catch(e => console.error('audit', e));
+      }
       next();
     })
     .catch(e => { console.error(e); res.status(500).json({ error: 'Server error' }); });

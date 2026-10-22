@@ -258,9 +258,44 @@ const bearer = tok => ({ authorization: 'Bearer ' + tok });
     assert.ok(pool.db.audit.some(a => a.action === 'company.delete'));
   });
 
+  await t('«Entra come»: codice monouso → sessione dell\'utente marcata come superadmin', async () => {
+    const no = await call('POST /super/users/uA/impersonate', {});
+    assert.strictEqual(no.status, 401, 'senza sessione superadmin non si entra');
+    const r = await call('POST /super/users/uA/impersonate', { headers: bearer(session) });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    const m = r.body.url.match(/^https:\/\/bizca\.bryan\.it\/#\/login\?imp=([a-f0-9]{48})$/);
+    assert.ok(m, r.body.url);
+    assert.ok(!/\./.test(m[1]), 'nell\'URL c\'è un codice, non il token di sessione');
+    const x = await call('POST /auth/impersonate', { body: { code: m[1] } });
+    assert.strictEqual(x.status, 200);
+    const payload = JSON.parse(Buffer.from(x.body.token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'), 'base64').toString());
+    assert.strictEqual(payload.uid, 'uA'); assert.strictEqual(payload.imp, 'max@bryan.it'); assert.ok(!payload.k);
+    assert.ok(payload.exp - Date.now() <= 2 * 3600 * 1000 + 1000, 'dura al massimo 2 ore');
+    const again = await call('POST /auth/impersonate', { body: { code: m[1] } });
+    assert.strictEqual(again.status, 400, 'il codice vale una volta sola');
+    // l'azienda cA è sospesa (test precedente): il supporto entra lo stesso
+    const ok = await call('GET /auth/check', { headers: bearer(x.body.token) });
+    assert.strictEqual(ok.status, 200, 'il superadmin vede anche un\'azienda sospesa');
+    assert.ok(pool.db.audit.some(a => a.action === 'user.impersonate' && a.target === 'uA'));
+    pool.db.audit.length = 0;
+    await call('PATCH /me', { headers: bearer(x.body.token), body: { locale: 'it' } });
+    assert.ok(pool.db.audit.some(a => a.action === 'as-user' && a.actor === 'max@bryan.it' && a.target === 'uA'), 'le modifiche fatte come utente sono registrate');
+    process.env.SUPERADMIN_EMAILS = 'davide.berardino@bryan.it';
+    const off = await call('GET /auth/check', { headers: bearer(x.body.token) });
+    delete process.env.SUPERADMIN_EMAILS;
+    assert.strictEqual(off.status, 401, 'tolto dall\'elenco, la sessione «come utente» si chiude');
+  });
+
+  await t('un codice scaduto non apre nulla', async () => {
+    const sa = require('./superadmin.js')._internals;
+    sa.impHandoff.set(sa.sha('b'.repeat(48)), { token: 'x', exp: Date.now() - 1 });
+    const r = await call('POST /auth/impersonate', { body: { code: 'b'.repeat(48) } });
+    assert.strictEqual(r.status, 400);
+  });
+
   await t('le rotte di gestione rifiutano chi non ha la sessione', async () => {
     for (const k of ['GET /super/overview', 'POST /super/companies', 'PATCH /super/companies/cA', 'DELETE /super/companies/cA',
-                     'POST /super/companies/cA/users', 'PATCH /super/users/uA', 'POST /super/users/uA/link', 'DELETE /super/users/uA', 'GET /super/companies/cA']) {
+                     'POST /super/companies/cA/users', 'PATCH /super/users/uA', 'POST /super/users/uA/link', 'DELETE /super/users/uA', 'GET /super/companies/cA', 'POST /super/users/uA/impersonate']) {
       const r = await call(k, {});
       assert.strictEqual(r.status, 401, k + ' → ' + r.status);
     }

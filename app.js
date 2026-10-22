@@ -11,6 +11,20 @@
   const TOKEN_KEY = 'bizca-token';
   const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } };
   const setToken = t => { try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} };
+  /* Superadmin "use the app as": the session token says who from Bryan is behind it.
+     The superadmin's own session on this device is kept aside and given back on exit. */
+  const PREV_KEY = 'bizca-token-prev';
+  function impBy() {
+    try { const b = getToken().split('.')[1]; if (!b) return null;
+      return JSON.parse(decodeURIComponent(escape(atob(b.replace(/-/g, '+').replace(/_/g, '/'))))).imp || null; } catch (e) { return null; }
+  }
+  function endImpersonation() {
+    let prev = '';
+    try { prev = localStorage.getItem(PREV_KEY) || ''; localStorage.removeItem(PREV_KEY); localStorage.removeItem('bizca-state-v1'); } catch (e) {}
+    setToken(prev);
+    location.hash = prev ? '#/home' : '#/login';
+    location.reload();
+  }
 
   async function api(method, path, body) {
     const res = await fetch(API + path, {
@@ -20,7 +34,7 @@
     });
     let data = {};
     try { data = await res.json(); } catch (e) {}
-    if (res.status === 401) { setToken(''); S.user = null; }
+    if (res.status === 401) { if (impBy()) { endImpersonation(); } else { setToken(''); S.user = null; } }
     // A workspace suspended by Bryan: sign out on this device too.
     if (res.status === 403 && data.suspended) {
       setToken(''); S.user = null;
@@ -397,12 +411,17 @@
     const brand = opts.brand ? '<div class="brandrow"><img src="icon-192.png" alt=""><div><div class="title">' + esc(title) + '</div><div class="sub">' + esc(sub) + '</div></div></div>' : '<div><div class="title">' + esc(title) + '</div>' + (sub ? '<div class="sub">' + esc(sub) + '</div>' : '') + '</div>';
     const right = opts.right || '';
     const off = S.online ? '' : '<span class="pill offline-tag" style="margin-left:6px">' + esc(t('Offline')) + '</span>';
+    const imp = impBy();
+    document.body.classList.toggle('imp', !!imp);
     app.innerHTML =
+      (imp ? '<div class="impbar"><span>' + esc(I18N.lang === 'it' ? 'Stai usando l\'app come' : 'You are using the app as') + ' <b>' + esc((user() && (user().name || user().email)) || '') + '</b> · ' + esc(DB.company.name || '') +
+        ' — ' + esc(I18N.lang === 'it' ? 'ogni azione è reale' : 'every action is real') + '</span><button id="impExit">' + esc(I18N.lang === 'it' ? 'Esci' : 'Exit') + '</button></div>' : '') +
       '<div class="topbar">' + back + brand + off + '<div class="spacer"></div>' + right + '</div>' +
       '<div class="screen">' + body + '</div>' +
       (activeTab ? tabbar(activeTab) : '') +
       (opts.fab ? '<button class="fab" data-nav="#/scan">' + ic.camera + '</button>' : '');
     bindCommon();
+    const ix = document.getElementById('impExit'); if (ix) ix.onclick = endImpersonation;
     if (opts.bind) opts.bind();
     saveState();
   }
@@ -1851,6 +1870,33 @@
   (async function start() {
     loadState();                       // offline cache first, so something shows instantly
     applyLang();                       // before the first render, so nothing flashes in English
+
+    // Opened from the superadmin console: become that user on this device.
+    const impCode = (location.hash.match(/[?&]imp=([a-f0-9]{16,})/) || [])[1];
+    if (impCode) {
+      location.hash = '#/login';
+      let ok = true;
+      // Leads not yet on the server belong to whoever is signed in now: never let
+      // them follow us into another company's workspace.
+      if (getToken() && !impBy() && S.online) { try { await flushQueued(); } catch (e) {} }
+      if (DB.leads.some(l => l._dirty || l.queuedOffline)) {
+        ok = false;
+        toast(I18N.lang === 'it' ? 'Su questo dispositivo ci sono lead non ancora sincronizzati: sincronizzali prima di entrare come un altro utente.'
+                                 : 'This device has leads not synced yet: sync them before using the app as someone else.', 'err');
+      }
+      if (ok) {
+        try {
+          const d = await api('POST', '/auth/impersonate', { code: impCode });
+          try { if (getToken() && !impBy() && !localStorage.getItem(PREV_KEY)) localStorage.setItem(PREV_KEY, getToken()); localStorage.removeItem(STORE_KEY); } catch (e) {}
+          DB.leads = []; DB.syncLog = []; S.user = null; S.activeEventId = null;
+          setToken(d.token);
+          await pullState();
+          location.hash = '#/home';
+          render();
+          return;
+        } catch (e) { toast(e.message, 'err'); }
+      }
+    }
 
     // Coming back from Microsoft sign-in
     const msCode = (location.hash.match(/[?&]ms=([^&]+)/) || [])[1];
