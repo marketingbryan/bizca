@@ -24,9 +24,15 @@ const idToken = claims => 'x.' + b64u(JSON.stringify(claims)) + '.y';
 const CFG = { tenantId: 'tenant-vid', clientId: 'client-vid', clientSecret: 'secret-vid',
   driveId:'d', itemId:'i', tableName:'Lead' };
 
-function fakePool(users, settings) {
+function fakePool(users, settings, companies) {
+  companies = companies || [];
   return { query: async (sql, p=[]) => {
     const one = rows => ({ rowCount: rows.length, rows });
+    if (/FROM companies WHERE lower\(domain\)=\$1 OR extra_domains \? \$1/.test(sql))
+      return one(companies.filter(c => c.domain === p[0] || (c.extra_domains || []).indexOf(p[0]) >= 0));
+    if (/SELECT id,domain,extra_domains,status,settings,locale FROM companies WHERE id=\$1/.test(sql))
+      return one(companies.filter(c => c.id === p[0]));
+    if (/INSERT INTO users/.test(sql)) { users.push({ id:p[0], company_id:p[1], name:p[2], email:p[3], role:'seller', status:'active', email_verified:true, locale:p[4] }); return { rowCount: 1 }; }
     if (/FROM users WHERE lower\(email\)=lower\(\$1\) AND company_id=\$2/.test(sql))
       return one(users.filter(u => u.email.toLowerCase()===String(p[0]).toLowerCase() && u.company_id===p[1]));
     if (/FROM users WHERE lower\(email\)=lower\(\$1\)/.test(sql))
@@ -42,7 +48,7 @@ function build(opts={}) {
   const users = opts.users || [{ id:'u2', company_id:'c1', name:'Laura', email:'laura@vid.it',
     role:'seller', status:'active', email_verified:false }];
   const settings = opts.settings || { c1: { ms: CFG } };
-  const pool = fakePool(users, settings);
+  const pool = fakePool(users, settings, opts.companies);
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push({ url, body: init && init.body });
@@ -165,6 +171,70 @@ function build(opts={}) {
     const { call } = build({ users: [{ id:'u2', company_id:'c1', name:'Laura', email:'laura@vid.it', role:'seller', status:'disabled', email_verified:true }] });
     const r = await call('POST /auth/microsoft/start', { body: { email: 'laura@vid.it' } });
     assert.strictEqual(r.status, 403);
+  });
+
+  // ---- ingresso automatico (msAutoJoin) ----
+  const VID = (over) => Object.assign({ id:'c1', domain:'vidfirekill.com', extra_domains:['vidfirekill.dk'], status:'active', locale:'it',
+    settings:{ ms: CFG, msAutoJoin: true } }, over || {});
+  const claimsFor = (email, over) => Object.assign({ tid:'tenant-vid', aud:'client-vid', email, name:'Astrid Rechnagel', exp: Math.floor(Date.now()/1000)+600 }, over || {});
+  const roundTrip = async (b, typed) => {
+    const start = await b.call('POST /auth/microsoft/start', { body: { email: typed } });
+    if (start.status !== 200) return { start };
+    const state = new URL(start.body.url).searchParams.get('state');
+    const cb = await b.call('GET /auth/microsoft/callback', { query: { code: 'c', state } });
+    return { start, cb };
+  };
+
+  await t('senza l\'interruttore, chi non è invitato resta fuori (come prima)', async () => {
+    const b = build({ companies: [VID({ settings: { ms: CFG } })], users: [] });
+    const r = await roundTrip(b, 'ahr@vidfirekill.dk');
+    assert.strictEqual(r.start.status, 404);
+    assert.strictEqual(b.users.length, 0);
+  });
+
+  await t('con l\'interruttore, un collega del tenant VID entra e viene creato come commerciale', async () => {
+    const b = build({ companies: [VID()], users: [], claims: claimsFor('ahr@vidfirekill.dk') });
+    const r = await roundTrip(b, 'AHR@vidfirekill.dk');
+    assert.strictEqual(r.start.status, 200, JSON.stringify(r.start.body));
+    assert.ok(/[?&]ms=/.test(r.cb.redirect), decodeURIComponent(r.cb.redirect || ''));
+    assert.strictEqual(b.users.length, 1);
+    const u = b.users[0];
+    assert.strictEqual(u.company_id, 'c1'); assert.strictEqual(u.role, 'seller'); assert.strictEqual(u.email, 'ahr@vidfirekill.dk');
+    assert.strictEqual(u.name, 'Astrid Rechnagel'); assert.strictEqual(u.email_verified, true);
+  });
+
+  await t('un ospite nel tenant VID con un indirizzo esterno non viene creato', async () => {
+    const b = build({ companies: [VID()], users: [], claims: claimsFor('consulente@gmail.com') });
+    const r = await roundTrip(b, 'ahr@vidfirekill.dk');
+    assert.ok(/mserror=/.test(r.cb.redirect), r.cb.redirect);
+    assert.strictEqual(b.users.length, 0);
+  });
+
+  await t('un account di un altro tenant non viene creato', async () => {
+    const b = build({ companies: [VID()], users: [], claims: claimsFor('ahr@vidfirekill.dk', { tid: 'tenant-altro' }) });
+    const r = await roundTrip(b, 'ahr@vidfirekill.dk');
+    assert.ok(/different%20Microsoft%20tenant/.test(r.cb.redirect), decodeURIComponent(r.cb.redirect));
+    assert.strictEqual(b.users.length, 0);
+  });
+
+  await t('se due aziende rivendicano il dominio, nessuno entra in automatico', async () => {
+    const b = build({ companies: [VID(), VID({ id:'c9', domain:'vidfirekill.dk', extra_domains:[] })], users: [] });
+    const r = await roundTrip(b, 'ahr@vidfirekill.dk');
+    assert.strictEqual(r.start.status, 404);
+  });
+
+  await t('un\'azienda sospesa non accoglie nuovi utenti', async () => {
+    const b = build({ companies: [VID({ status: 'suspended' })], users: [] });
+    const r = await roundTrip(b, 'ahr@vidfirekill.dk');
+    assert.strictEqual(r.start.status, 404);
+  });
+
+  await t('chi è già invitato entra come sempre, senza duplicati', async () => {
+    const users = [{ id:'u7', company_id:'c1', name:'Gaia', email:'ggi@vidfirekill.com', role:'admin', status:'active', email_verified:true }];
+    const b = build({ companies: [VID()], users, claims: claimsFor('ggi@vidfirekill.com') });
+    const r = await roundTrip(b, 'ggi@vidfirekill.com');
+    assert.ok(/[?&]ms=/.test(r.cb.redirect));
+    assert.strictEqual(b.users.length, 1); assert.strictEqual(b.users[0].role, 'admin');
   });
 
   await t('le rivendicazioni dell\'email si leggono in ordine di preferenza', () => {

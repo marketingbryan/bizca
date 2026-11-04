@@ -48,7 +48,9 @@ function fakeDb() {
       if (/SELECT name,locale FROM companies WHERE id=\$1/.test(sql)) return one(db.companies.filter(c => c.id === p[0]));
       if (/SELECT id FROM companies WHERE id=\$1/.test(sql)) return one(db.companies.filter(c => c.id === p[0]));
       if (/SELECT status FROM companies WHERE id=\$1/.test(sql)) return one(db.companies.filter(c => c.id === p[0]));
-      if (/UPDATE companies SET name=COALESCE/.test(sql)) { const c = db.companies.find(x => x.id === p[4]); if (p[3]) c.status = p[3]; if (p[0]) c.name = p[0]; return one([]); }
+      if (/UPDATE companies SET name=COALESCE/.test(sql)) { const c = db.companies.find(x => x.id === p[p.length - 1]); if (p[3]) c.status = p[3]; if (p[0]) c.name = p[0]; if (p[1]) c.domain = p[1]; if (p[4]) c.extra_domains = JSON.parse(p[4]); return one([]); }
+      if (/SELECT name FROM companies WHERE id<>\$1 AND/.test(sql)) return one(db.companies.filter(c => c.id !== p[0] && p[1].some(d => d === c.domain || (c.extra_domains || []).indexOf(d) >= 0)));
+      if (/UPDATE companies SET settings=\$1 WHERE id=\$2/.test(sql)) { const c = db.companies.find(x => x.id === p[1]); c.settings = p[0]; return one([]); }
       if (/SELECT \(SELECT count/.test(sql)) return one([{ users: 1, leads: 0 }]);
       if (/DELETE FROM companies WHERE id=\$1/.test(sql)) { db.companies = db.companies.filter(c => c.id !== p[0]); db.users = db.users.filter(u => u.company_id !== p[0]); return one([]); }
       if (/SELECT id,company_id,name,email,role,status,password_hash/.test(sql)) return one(db.users.filter(u => u.id === p[0]));
@@ -291,6 +293,18 @@ const bearer = tok => ({ authorization: 'Bearer ' + tok });
     sa.impHandoff.set(sa.sha('b'.repeat(48)), { token: 'x', exp: Date.now() - 1 });
     const r = await call('POST /auth/impersonate', { body: { code: 'b'.repeat(48) } });
     assert.strictEqual(r.status, 400);
+  });
+
+  await t('domini extra: validi, puliti, e un dominio appartiene a una sola azienda', async () => {
+    const bad = await call('PATCH /super/companies/cA', { headers: bearer(session), body: { extraDomains: 'non un dominio' } });
+    assert.strictEqual(bad.status, 400);
+    const clash = await call('PATCH /super/companies/cA', { headers: bearer(session), body: { extraDomains: 'acme.it' } });
+    assert.strictEqual(clash.status, 409, 'acme.it è già dell\'azienda creata prima');
+    const ok = await call('PATCH /super/companies/cA', { headers: bearer(session), body: { extraDomains: '@VidFirekill.dk, vidfirekill.dk', msAutoJoin: true } });
+    assert.strictEqual(ok.status, 200, JSON.stringify(ok.body));
+    const c = pool.db.companies.find(x => x.id === 'cA');
+    assert.deepStrictEqual(c.extra_domains, ['vidfirekill.dk']);
+    assert.strictEqual(c.settings.msAutoJoin, true);
   });
 
   await t('le rotte di gestione rifiutano chi non ha la sessione', async () => {

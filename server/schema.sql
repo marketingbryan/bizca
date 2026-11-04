@@ -136,3 +136,7 @@ CREATE TABLE IF NOT EXISTS super_audit (
   at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS super_audit_at_idx ON super_audit (at DESC);
+
+-- Extra email domains of a company (the main one stays in "domain"). Set by a
+-- Bryan superadmin only; used to recognise new people who sign in with Microsoft.
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS extra_domains JSONB NOT NULL DEFAULT '[]'::jsonb;

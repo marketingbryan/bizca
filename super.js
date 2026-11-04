@@ -216,6 +216,11 @@
         '<div class="grid3"><div class="field"><label>Nome</label><input class="input" id="eName" value="' + esc(c.name) + '"></div>' +
         '<div class="field"><label>Dominio</label><input class="input" id="eDom" value="' + esc(c.domain) + '"></div>' +
         '<div class="field"><label>Lingua predefinita</label><select class="input" id="eLang"><option value="it"' + (c.locale === 'it' ? ' selected' : '') + '>Italiano</option><option value="en"' + (c.locale !== 'it' ? ' selected' : '') + '>English</option></select></div></div>' +
+        '<div class="field"><label>Altri domini email dell\'azienda</label><input class="input" id="eExtra" value="' + esc((c.extraDomains || []).join(', ')) + '" placeholder="es. vidfirekill.dk, vid.de"></div>' +
+        '<label class="chk"><input type="checkbox" id="eJoin"' + (c.msAutoJoin ? ' checked' : '') + (c.msReady ? '' : ' disabled') + '> Crea in automatico chi entra con Microsoft (come commerciale)</label>' +
+        '<p class="hint" style="margin:-8px 0 12px">' + (c.msReady
+          ? 'Entra solo chi ha un account nel Microsoft dell\'azienda e un indirizzo su uno dei domini qui sopra. L\'admin del cliente può accenderlo o spegnerlo anche da Admin → Destinazioni.'
+          : 'Disponibile quando l\'azienda ha inserito la sua app Microsoft in Admin → Destinazioni.') + '</p>' +
         '<button class="btn soft sm" id="eSave">Salva modifiche</button></div>' +
 
       '<div class="card"><h3>' + (suspended ? 'Riattiva l\'azienda' : 'Sospendi l\'azienda') + '</h3><p class="hint">' + (suspended
@@ -231,7 +236,8 @@
     $('#dx').onclick = closeDrawer;
     $('#addU').onclick = () => addUser(c);
     $('#eSave').onclick = async () => {
-      try { await api('PATCH', '/super/companies/' + cid, { name: $('#eName').value, domain: $('#eDom').value, locale: $('#eLang').value }); toast('Salvato', 'ok'); refresh(); }
+      try { await api('PATCH', '/super/companies/' + cid, { name: $('#eName').value, domain: $('#eDom').value, locale: $('#eLang').value,
+              extraDomains: $('#eExtra').value, msAutoJoin: $('#eJoin').checked }); toast('Salvato', 'ok'); refresh(); }
       catch (e) { toast(e.message, 'err'); }
     };
     $('#susp').onclick = () => {

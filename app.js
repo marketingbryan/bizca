@@ -68,6 +68,7 @@
     DB.brevoApiKey = s.brevoApiKey || '';
     DB.newsletterListId = s.newsletterListId || null;
     DB.ms = d.ms || { enabled: false };
+    DB.msAutoJoin = !!s.msAutoJoin;
     DB.fallbackOwner = s.fallbackOwner || (DB.users[0] && DB.users[0].id) || null;
     S.user = (d.me && DB.users.find(u => u.id === d.me.id)) || null;
     applyLang();
@@ -185,7 +186,7 @@
         leads: DB.leads, pickLists: DB.pickLists, events: DB.events,
         assignmentRules: DB.assignmentRules, users: DB.users, destinations: DB.destinations,
         fallbackOwner: DB.fallbackOwner, allowOverride: DB.allowOverride, autoSend: DB.autoSend,
-        requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey, ms: DB.ms,
+        requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey, ms: DB.ms, msAutoJoin: DB.msAutoJoin,
         newsletterListId: DB.newsletterListId,
         syncLog: DB.syncLog.slice(0, 300),
         session: { activeEventId: S.activeEventId, captureType: S.captureType, userId: S.user ? S.user.id : null }
@@ -211,7 +212,7 @@
       if (!raw) return;
       const d = JSON.parse(raw);
       ['company','leads','pickLists','events','assignmentRules','users','destinations','syncLog'].forEach(k => { if (d[k]) DB[k] = d[k]; });
-      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey','ms','newsletterListId'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
+      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey','ms','newsletterListId','msAutoJoin'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
       if (d.session) {
         if (d.session.activeEventId) S.activeEventId = d.session.activeEventId;
         if (d.session.captureType) S.captureType = d.session.captureType;
@@ -1592,10 +1593,38 @@
           ? 'Il file è collegato ma l\'invio a Excel è spento: i lead inviati non vengono scritti. Accendi l\'interruttore qui sotto.'
           : 'The workbook is connected but sending to Excel is off: sent leads are not written. Turn on the switch below.')+'</div></div>' : '') +
       '<div class="kv" style="margin-top:12px;border:none"><span class="k">'+esc(t('Send leads to Excel'))+'</span><div class="switch '+(m.enabled?'on':'')+'" id="msOn"></div></div>' +
+      msJoinBlock(m) +
       '</div>';
   }
 
+  /* Colleagues from the company's Microsoft tenant can join on their own. */
+  function msJoinBlock(m) {
+    const doms = [DB.company.domain].concat(DB.company.extraDomains || []).filter(Boolean);
+    const it = I18N.lang === 'it';
+    const canUse = !!(m.tenantId && m.clientId && m.hasOwnSecret);
+    return '<h4 style="margin:18px 0 8px;font-size:14px">4 · ' + esc(it ? 'Accesso dei colleghi' : 'Colleague sign-in') + '</h4>' +
+      '<p class="hint" style="margin:0 0 6px">' + esc(it
+        ? 'Se è attivo, chi entra con «Accedi con Microsoft» usando un account della vostra azienda viene creato in automatico come commerciale, senza invito. Vale solo per gli indirizzi su: '
+        : 'When on, anyone who uses "Sign in with Microsoft" with an account of your organisation is created automatically as a seller, no invite needed. Only for addresses on: ') +
+        '<b>' + esc(doms.map(d => '@' + d).join(', ')) + '</b>.</p>' +
+      '<p class="hint" style="margin:0 0 6px">' + esc(it
+        ? 'Per aggiungere un altro dominio aziendale scrivete a Bryan.'
+        : 'To add another company domain, contact Bryan.') + '</p>' +
+      (canUse ? '' : '<p class="hint" style="margin:0 0 6px;color:#92400E">' + esc(it ? 'Serve prima l\'app Microsoft della vostra azienda (passo 1).' : 'Your company\'s own Microsoft app is needed first (step 1).') + '</p>') +
+      '<div class="kv" style="border:none"><span class="k">' + esc(it ? 'Crea in automatico chi entra con Microsoft' : 'Create Microsoft users automatically') + '</span>' +
+      '<div class="switch ' + (DB.msAutoJoin ? 'on' : '') + '" id="msJoin"></div></div>';
+  }
+
   function bindMsCard() {
+    const mj = document.getElementById('msJoin'); if (mj) mj.onclick = async () => {
+      const next = !DB.msAutoJoin;
+      const m = DB.ms || {};
+      if (next && !(m.tenantId && m.clientId && m.hasOwnSecret)) { toast(I18N.lang === 'it' ? 'Completa prima il passo 1 con l\'app Microsoft della vostra azienda' : 'Complete step 1 with your company\'s Microsoft app first', 'err'); return; }
+      try { await api('PATCH', '/settings', { msAutoJoin: next }); DB.msAutoJoin = next; saveState();
+        toast((I18N.lang === 'it' ? 'Ingresso automatico · ' : 'Automatic sign-up · ') + (next ? t('enabled') : t('disabled')), 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+      adminDest();
+    };
     const busy = (el, label) => { el.disabled = true; el.innerHTML = '<div class="spinner"></div> ' + label; };
 
     const consentFlag = /[?&]msconsent=1/.test(location.hash);

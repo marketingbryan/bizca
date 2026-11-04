@@ -115,7 +115,7 @@ function mount(app, deps) {
   }));
 
   app.get('/super/companies/:cid', superAuth, wrap(async (req, res) => {
-    const c = await pool.query('SELECT id,name,domain,locale,status,created_at FROM companies WHERE id=$1', [req.params.cid]);
+    const c = await pool.query('SELECT id,name,domain,extra_domains,locale,status,settings,created_at FROM companies WHERE id=$1', [req.params.cid]);
     if (!c.rowCount) return res.status(404).json({ error: 'Azienda non trovata' });
     const u = await pool.query(`SELECT u.id,u.name,u.email,u.role,u.status,u.email_verified,u.created_at,
                                        (u.password_hash IS NOT NULL) AS has_password,
@@ -124,7 +124,8 @@ function mount(app, deps) {
     const co = c.rows[0];
     res.json({
       ok: true,
-      company: { id: co.id, name: co.name, domain: co.domain, locale: co.locale, status: co.status || 'active', createdAt: new Date(co.created_at).getTime() },
+      company: { id: co.id, name: co.name, domain: co.domain, extraDomains: Array.isArray(co.extra_domains) ? co.extra_domains : [], msAutoJoin: (co.settings || {}).msAutoJoin === true,
+        msReady: !!(ms && (p => p.tenantId && p.clientId && p.hasOwnSecret)(ms.publicCfg(co.settings || {}))), locale: co.locale, status: co.status || 'active', createdAt: new Date(co.created_at).getTime() },
       users: u.rows.map(r => ({ id: r.id, name: r.name, email: r.email, role: r.role, status: r.status, leads: r.leads,
         activated: !!r.has_password || !!r.email_verified, createdAt: new Date(r.created_at).getTime() }))
     });
@@ -166,9 +167,27 @@ function mount(app, deps) {
     const name = b.name !== undefined ? String(b.name).trim() || null : null;
     const domain = b.domain !== undefined ? cleanDomain(b.domain) || null : null;
     const locale = b.locale !== undefined ? emails.pick(b.locale) : null;
-    await pool.query('UPDATE companies SET name=COALESCE($1,name), domain=COALESCE($2,domain), locale=COALESCE($3,locale), status=COALESCE($4,status) WHERE id=$5',
-      [name, domain, locale, b.status || null, req.params.cid]);
-    audit(req, b.status ? 'company.' + b.status : 'company.update', req.params.cid, { name, domain, locale, status: b.status || null });
+    // Extra email domains: a domain can belong to one company only, or a sign-in
+    // could not tell which workspace a newcomer should join.
+    let extra = null;
+    if (b.extraDomains !== undefined) {
+      const list = (Array.isArray(b.extraDomains) ? b.extraDomains : String(b.extraDomains).split(/[\s,;]+/)).map(cleanDomain).filter(Boolean);
+      extra = Array.from(new Set(list));
+      if (extra.some(d => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d))) return res.status(400).json({ error: 'Dominio non valido' });
+      const all = extra.concat(domain ? [domain] : []);
+      if (all.length) {
+        const clash = await pool.query("SELECT name FROM companies WHERE id<>$1 AND (lower(domain) = ANY($2::text[]) OR extra_domains ?| $2::text[])", [req.params.cid, all]);
+        if (clash.rowCount) return res.status(409).json({ error: 'Uno di questi domini è già di ' + clash.rows[0].name });
+      }
+    }
+    await pool.query('UPDATE companies SET name=COALESCE($1,name), domain=COALESCE($2,domain), locale=COALESCE($3,locale), status=COALESCE($4,status), extra_domains=COALESCE($5::jsonb,extra_domains) WHERE id=$6',
+      [name, domain, locale, b.status || null, extra ? JSON.stringify(extra) : null, req.params.cid]);
+    if (b.msAutoJoin !== undefined) {
+      const cur2 = await pool.query('SELECT settings FROM companies WHERE id=$1', [req.params.cid]);
+      const st = Object.assign({}, (cur2.rows[0] || {}).settings || {}, { msAutoJoin: b.msAutoJoin === true });
+      await pool.query('UPDATE companies SET settings=$1 WHERE id=$2', [st, req.params.cid]);
+    }
+    audit(req, b.status ? 'company.' + b.status : 'company.update', req.params.cid, { name, domain, locale, status: b.status || null, extraDomains: extra, msAutoJoin: b.msAutoJoin === undefined ? null : b.msAutoJoin === true });
     res.json({ ok: true });
   }));
 

@@ -10,8 +10,13 @@
    to send the person to before it can start. So it asks for the work email
    first, looks up the company from it, and only then redirects.
 
-   What it will never do: create an account. Only people the admin has already
-   invited can sign in, exactly like the Google flow.
+   Who gets in:
+     - people the admin has already invited, as with Google;
+     - and, only if the company switched on "msAutoJoin", anyone from the
+       company's own Microsoft tenant whose address is on one of the company's
+       domains. They are created on the spot as sellers. Microsoft vouches for
+       the tenant (tid), the domain check keeps out guest accounts that live in
+       that tenant with outside addresses.
 
    The app registration needs one extra redirect URI, of type Web:
      {API_URL}/auth/microsoft/callback
@@ -57,12 +62,27 @@ setInterval(() => {
   for (const [k, v] of handoff) if (v.exp <= now) handoff.delete(k);
 }, 60 * 1000).unref?.();
 
+const domainOf = e => String(e || '').split('@')[1] || '';
+const companyDomains = c => [c.domain].concat(Array.isArray(c.extra_domains) ? c.extra_domains : [])
+  .map(d => String(d || '').trim().toLowerCase()).filter(Boolean);
+const msComplete = cfg => !!(cfg.tenantId && cfg.clientId && cfg.clientSecret);
+
 function mount(app, deps) {
   const { pool, ms, sign, verifyToken, session, outUser, APP_URL, API_URL } = deps;
   const fetchImpl = deps.fetch || global.fetch;
   const redirectUri = () => (process.env.MS_LOGIN_REDIRECT_URI || (API_URL + '/auth/microsoft/callback'));
 
   const back = (params) => APP_URL + '/#/login?' + params;
+
+  /* The one company that owns this email domain and lets Microsoft users join on
+     their own. Two candidates = ambiguous = nobody: we never guess a workspace. */
+  async function autoJoinCompany(domain) {
+    if (!domain) return null;
+    const r = await pool.query("SELECT id,domain,extra_domains,status,settings FROM companies WHERE lower(domain)=$1 OR extra_domains ? $1", [domain]);
+    const ok = r.rows.filter(c => c.status !== 'suspended' && (c.settings || {}).msAutoJoin === true && companyDomains(c).indexOf(domain) >= 0)
+      .map(c => Object.assign({}, c, { cfg: ms.readCfg(c.settings) })).filter(c => msComplete(c.cfg));
+    return ok.length === 1 ? ok[0] : null;
+  }
 
   /* Step 1 — which tenant does this person belong to? */
   app.post('/auth/microsoft/start', async (req, res) => {
@@ -71,16 +91,23 @@ function mount(app, deps) {
       if (!email) throw httpError(400, 'Enter your work email first');
 
       const u = await pool.query('SELECT id,company_id,status FROM users WHERE lower(email)=lower($1)', [email]);
-      if (!u.rowCount) throw httpError(404, 'No Bizca account for ' + email + ' — ask your admin to invite you');
-      if (u.rows[0].status !== 'active') throw httpError(403, 'This account is disabled');
-
-      const co = await pool.query('SELECT settings FROM companies WHERE id=$1', [u.rows[0].company_id]);
-      const cfg = ms.readCfg(co.rows[0] && co.rows[0].settings);
-      if (!cfg.tenantId || !cfg.clientId || !cfg.clientSecret) {
-        throw httpError(400, 'Microsoft sign-in is not set up for your company yet — your admin can add it in Admin → Destinations');
+      let cid, uid = null, cfg;
+      if (u.rowCount) {
+        if (u.rows[0].status !== 'active') throw httpError(403, 'This account is disabled');
+        cid = u.rows[0].company_id; uid = u.rows[0].id;
+        const co = await pool.query('SELECT settings FROM companies WHERE id=$1', [cid]);
+        cfg = ms.readCfg(co.rows[0] && co.rows[0].settings);
+        if (!msComplete(cfg)) {
+          throw httpError(400, 'Microsoft sign-in is not set up for your company yet — your admin can add it in Admin → Destinations');
+        }
+      } else {
+        // Not invited: is there exactly one company that lets its people in automatically?
+        const hit = await autoJoinCompany(domainOf(email));
+        if (!hit) throw httpError(404, 'No Bizca account for ' + email + ' — ask your admin to invite you');
+        cid = hit.id; cfg = hit.cfg;
       }
 
-      const state = sign({ k: 'mslogin', cid: u.rows[0].company_id, uid: u.rows[0].id, exp: Date.now() + 10 * 60 * 1000 });
+      const state = sign({ k: 'mslogin', cid, uid, auto: !uid, exp: Date.now() + 10 * 60 * 1000 });
       const url = LOGIN + '/' + encodeURIComponent(cfg.tenantId) + '/oauth2/v2.0/authorize'
         + '?client_id=' + encodeURIComponent(cfg.clientId)
         + '&response_type=code'
@@ -94,6 +121,28 @@ function mount(app, deps) {
       res.status(e.status || 500).json({ error: e.message || 'Server error' });
     }
   });
+
+  /* Create the account of someone from the company's tenant (already checked by
+     the caller: tid and aud match this company's app). */
+  async function autoJoin(cid, email, claims) {
+    const noAccount = { error: 'No Bizca account for ' + email + ' — ask your admin to invite that address' };
+    const co = await pool.query('SELECT id,domain,extra_domains,status,settings,locale FROM companies WHERE id=$1', [cid]);
+    if (!co.rowCount) return noAccount;
+    const c = co.rows[0];
+    if ((c.settings || {}).msAutoJoin !== true) return noAccount;
+    if (c.status === 'suspended') return { error: 'This workspace is suspended — contact Bryan' };
+    if (companyDomains(c).indexOf(domainOf(email)) < 0) {
+      return { error: email + ' is not on one of ' + (c.domain || 'the company') + '\'s email domains — ask your admin to invite you' };
+    }
+    const taken = await pool.query('SELECT 1 FROM users WHERE lower(email)=lower($1)', [email]);
+    if (taken.rowCount) return { error: 'This address already has a Bizca account in another workspace' };
+    const uid = 'u_' + Date.now().toString(36) + require('crypto').randomBytes(4).toString('hex');
+    const name = String(claims.name || '').trim() || email.split('@')[0];
+    await pool.query("INSERT INTO users (id,company_id,name,email,role,status,email_verified,locale) VALUES ($1,$2,$3,$4,'seller','active',true,$5)",
+      [uid, cid, name, email, c.locale || null]);
+    console.log('Microsoft auto-join:', email, '→', cid);
+    return { ok: true, uid };
+  }
 
   /* Step 2 — Microsoft sends the person back here with a code */
   app.get('/auth/microsoft/callback', async (req, res) => {
@@ -134,8 +183,13 @@ function mount(app, deps) {
       const email = emailFromClaims(claims);
       if (!email) return fail('Microsoft did not return an email address for that account');
 
-      const ur = await pool.query('SELECT * FROM users WHERE lower(email)=lower($1) AND company_id=$2', [email, p.cid]);
-      if (!ur.rowCount) return fail('No Bizca account for ' + email + ' — ask your admin to invite that address');
+      let ur = await pool.query('SELECT * FROM users WHERE lower(email)=lower($1) AND company_id=$2', [email, p.cid]);
+      if (!ur.rowCount) {
+        const created = await autoJoin(p.cid, email, claims);
+        if (created.error) return fail(created.error);
+        ur = await pool.query('SELECT * FROM users WHERE lower(email)=lower($1) AND company_id=$2', [email, p.cid]);
+        if (!ur.rowCount) return fail('Sign-in failed');
+      }
       const user = ur.rows[0];
       if (user.status !== 'active') return fail('This account is disabled');
 
@@ -171,7 +225,7 @@ function mount(app, deps) {
       const email = String(req.query.email || '').trim().toLowerCase();
       if (!email) return res.json({ available: false });
       const u = await pool.query('SELECT company_id FROM users WHERE lower(email)=lower($1)', [email]);
-      if (!u.rowCount) return res.json({ available: false });
+      if (!u.rowCount) return res.json({ available: !!(await autoJoinCompany(domainOf(email))) });
       const co = await pool.query('SELECT settings FROM companies WHERE id=$1', [u.rows[0].company_id]);
       const cfg = ms.readCfg(co.rows[0] && co.rows[0].settings);
       res.json({ available: !!(cfg.tenantId && cfg.clientId && cfg.clientSecret) });
@@ -179,4 +233,4 @@ function mount(app, deps) {
   });
 }
 
-module.exports = { mount, _internals: { readIdToken, emailFromClaims, stash, claim, handoff } };
+module.exports = { mount, companyDomains, _internals: { readIdToken, emailFromClaims, stash, claim, handoff, companyDomains } };
