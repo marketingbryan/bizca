@@ -1,0 +1,11 @@
+{
+  "name": "bizca-tests",
+  "private": true,
+  "description": "Frontend tests for Bizca: every screen rendered in jsdom, no browser needed.",
+  "scripts": {
+    "test": "bash run.sh"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

@@ -1,0 +1,6 @@
+# Only the app and the api/ functions go to Vercel. Server, tests and notes stay out.
+server/
+tests/
+scripts/
+BRAND.md
+README.md
