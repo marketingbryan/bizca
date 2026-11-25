@@ -150,7 +150,7 @@ function loadServer(pool) {
     await call('PUT /leads/nuovo4', { headers: { authorization: 'Bearer ' + tok }, body: { first: 'X', image: 'x" onerror="alert(1)' } });
     assert.strictEqual(pool.leads.find(l => l.id === 'nuovo4').card_image, null);
     await call('PUT /leads/nuovo5', { headers: { authorization: 'Bearer ' + tok }, body: { first: 'X', image: 'data:image/jpeg;base64,AAAA' } });
-    assert.strictEqual(pool.leads.find(l => l.id === 'nuovo5').card_image, 'data:image/jpeg;base64,AAAA');
+    assert.strictEqual(pool.leads.find(l => l.id === 'nuovo5').card_image, null, 'privacy: neanche una foto valida viene salvata');
   });
 
   await t('un commerciale elimina i propri lead', async () => {

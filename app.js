@@ -67,6 +67,7 @@
     DB.allowOverride = s.allowOverride !== false;
     DB.brevoApiKey = s.brevoApiKey || '';
     DB.newsletterListId = s.newsletterListId || null;
+    DB.privacy = s.privacy || null;
     DB.ms = d.ms || { enabled: false };
     DB.msAutoJoin = !!s.msAutoJoin;
     DB.fallbackOwner = s.fallbackOwner || (DB.users[0] && DB.users[0].id) || null;
@@ -88,10 +89,18 @@
     l._dirty = true;
     saveState();
     if (!getToken()) return Promise.resolve(false);
-    const payload = Object.assign({}, l); delete payload._dirty;
+    const payload = Object.assign({}, l); delete payload._dirty; delete payload._review;
+    delete payload.image;            // privacy: the card photo never leaves the phone for our server
     return api('PUT', '/leads/' + l.id, payload)
       .then(() => { l._dirty = false; saveState(); return true; })
       .catch(() => false);
+  }
+  /* Privacy: the card photo lives only while the lead is being reviewed. Once the
+     lead is confirmed (saved or sent) it is wiped, from memory and from the cache. */
+  function dropPhoto(l) {
+    if (!l || (!l.image && !l._review)) return;
+    l.image = null; delete l._review;
+    saveState();
   }
   async function flushDirty() {
     const dirty = DB.leads.filter(l => l._dirty);
@@ -186,7 +195,7 @@
         leads: DB.leads, pickLists: DB.pickLists, events: DB.events,
         assignmentRules: DB.assignmentRules, users: DB.users, destinations: DB.destinations,
         fallbackOwner: DB.fallbackOwner, allowOverride: DB.allowOverride, autoSend: DB.autoSend,
-        requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey, ms: DB.ms, msAutoJoin: DB.msAutoJoin,
+        requireConsent: DB.requireConsent, brevoApiKey: DB.brevoApiKey, ms: DB.ms, msAutoJoin: DB.msAutoJoin, privacy: DB.privacy,
         newsletterListId: DB.newsletterListId,
         syncLog: DB.syncLog.slice(0, 300),
         session: { activeEventId: S.activeEventId, captureType: S.captureType, userId: S.user ? S.user.id : null }
@@ -194,15 +203,20 @@
       try {
         localStorage.setItem(STORE_KEY, JSON.stringify(snap));
       } catch (quota) {
-        // Storage full — drop card images oldest-first, then retry
+        /* Storage full. Card photos go first, oldest first: they are only a reading aid.
+           A signature is the proof of consent: it is dropped from this cache only once
+           the server has it (the server copy comes back with the next sync). A
+           signature that exists only on this phone is never touched. */
         const clone = JSON.parse(JSON.stringify(snap));
         clone.leads.sort((a, b) => a.ts - b.ts);
+        const tryWrite = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(clone)); return true; } catch (e) { return false; } };
         for (const l of clone.leads) {
-          if (l.image || l.consentSignature) {
-            l.image = null; l.consentSignature = null;
-            try { localStorage.setItem(STORE_KEY, JSON.stringify(clone)); return; } catch (e) {}
-          }
+          if (l.image) { l.image = null; if (tryWrite()) return; }
         }
+        for (const l of clone.leads) {
+          if (l.consentSignature && !l._dirty && !l.queuedOffline) { l.consentSignature = null; if (tryWrite()) return; }
+        }
+        console.warn('Bizca: device storage full — unsynced leads stay in memory until the next sync');
       }
     } catch (e) {}
   }
@@ -212,7 +226,9 @@
       if (!raw) return;
       const d = JSON.parse(raw);
       ['company','leads','pickLists','events','assignmentRules','users','destinations','syncLog'].forEach(k => { if (d[k]) DB[k] = d[k]; });
-      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey','ms','newsletterListId','msAutoJoin'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
+      // A photo kept in an old cache, or of a lead no longer under review, is dropped on load.
+      (DB.leads || []).forEach(l => { if (l.image && !l._review) l.image = null; });
+      ['fallbackOwner','allowOverride','autoSend','requireConsent','brevoApiKey','ms','newsletterListId','msAutoJoin','privacy'].forEach(k => { if (d[k] !== undefined) DB[k] = d[k]; });
       if (d.session) {
         if (d.session.activeEventId) S.activeEventId = d.session.activeEventId;
         if (d.session.captureType) S.captureType = d.session.captureType;
@@ -518,8 +534,8 @@
           '<label class="select-item" for="privacyOk" style="cursor:pointer;margin-top:14px">' +
             '<input type="checkbox" id="privacyOk" style="width:20px;height:20px;accent-color:var(--indigo)">' +
             '<span style="font-size:13px;color:var(--slate)">' + (I18N.lang === 'it'
-              ? 'Ho letto e accetto l\'<a href="https://www.bryan.it/privacy-policy" target="_blank" rel="noopener">informativa privacy</a> e acconsento al trattamento dei miei dati.'
-              : 'I have read and accept the <a href="https://www.bryan.it/privacy-policy" target="_blank" rel="noopener">privacy policy</a> and agree to the processing of my data.') +
+              ? 'Ho letto e accetto l\'<a href="/privacy/" target="_blank" rel="noopener">informativa privacy</a> e acconsento al trattamento dei miei dati.'
+              : 'I have read and accept the <a href="/privacy/en/" target="_blank" rel="noopener">privacy policy</a> and agree to the processing of my data.') +
             ' <span class="req">*</span></span>' +
           '</label>' +
           '<button class="btn primary" id="doSetup" style="margin-top:14px">' + esc(t('Create workspace')) + '</button>' +
@@ -976,7 +992,7 @@
       provenienza: sourceValue(), country: d.country || preset.country || '', interesse: preset.interesse || '',
       eventId: captureType() === 'event' && ev ? ev.id : null,
       captureType: captureType(), brevoListId: sessionListId(), newsletter: false,
-      ownerId: user().id, createdBy: user().id, status: 'To finalize', override: false, image: image, ts: Date.now()
+      ownerId: user().id, createdBy: user().id, status: 'To finalize', override: false, image: image, _review: true, ts: Date.now()
     };
     DB.leads.unshift(lead);
     saveState(); saveLead(lead);
@@ -1043,10 +1059,11 @@
       if (ow) ow.onchange = () => { l.ownerId = ow.value; saveState(); saveLead(l); toast(t('Assigned to') + ' ' + userName(l.ownerId), 'ok'); };
       bindSegChips(l, () => { saveLead(l); leadScreen(l.id); });
       const nk = $('#newsOk'); if (nk) nk.onchange = () => { l.newsletter = nk.checked; saveState(); saveLead(l); };
-      const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; saveState(); saveLead(l); toast(t('Draft saved'),'ok'); go('#/leads'); };
+      const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; dropPhoto(l); saveState(); saveLead(l); toast(t('Draft saved'),'ok'); go('#/leads'); };
       const sb = $('#send'); if (sb) sb.onclick = () => sendLead(l);
-      const rs = $('#reSign'); if (rs) rs.onclick = () => { l.consentSignature = null; l.consentAt = null; saveState(); saveLead(l); leadScreen(l.id); };
+      const rs = $('#reSign'); if (rs) rs.onclick = () => { l.consentSignature = null; l.consentAt = null; l.consentVersion = null; saveState(); saveLead(l); leadScreen(l.id); };
       initSigPad(l);
+      bindConsent(l);
     }});
   }
 
@@ -1104,25 +1121,157 @@
     };
   }
 
+  /* ---------- privacy notice for the contacts collected at events ----------
+     The exhibiting company is the data controller, Bryan the processor. The
+     company details come from Admin → Privacy. When the text changes, bump
+     PRIVACY_VERSION: every signature stores the version it was given under. */
+  const PRIVACY_VERSION = '2026-11-25';
+  let consentLang = null;              // language of the notice shown to the contact (IT/EN switch)
+  function privacyInfo() {
+    const p = DB.privacy || {};
+    return { name: p.legalName || DB.company.name || '', address: p.address || '', vat: p.vat || '', email: p.email || '' };
+  }
+  const privacyComplete = () => { const p = privacyInfo(); return !!(p.name && p.address && p.vat && p.email); };
+  const ph = (v, it, en, lang) => v ? esc(v) : '<span style="color:#B45309">[' + (lang === 'it' ? it : en) + ']</span>';
+
+  function consentShortHtml(lang) {
+    const p = privacyInfo();
+    const co = ph(p.name, 'azienda', 'company', lang), mail = ph(p.email, 'email privacy', 'privacy email', lang);
+    return lang === 'it'
+      ? '<p style="margin:0 0 8px"><b>Consenso al trattamento dei dati</b></p>' +
+        '<p style="margin:0 0 8px">Con la firma acconsenti a essere ricontattato da ' + co + ' con informazioni commerciali sui suoi prodotti e servizi.</p>' +
+        '<p style="margin:0">I dati provengono dal biglietto che ci hai consegnato. La foto del biglietto viene cancellata subito dopo la lettura. Puoi revocare il consenso quando vuoi scrivendo a ' + mail + '.</p>'
+      : '<p style="margin:0 0 8px"><b>Consent to the processing of your data</b></p>' +
+        '<p style="margin:0 0 8px">By signing, you agree to be contacted by ' + co + ' with commercial information about its products and services.</p>' +
+        '<p style="margin:0">Your details come from the business card you gave us. The photo of the card is deleted right after it is read. You can withdraw your consent at any time by writing to ' + mail + '.</p>';
+  }
+
+  function noticeFullHtml(lang) {
+    const p = privacyInfo();
+    const it = lang === 'it';
+    const co = ph(p.name, 'ragione sociale', 'company name', lang), addr = ph(p.address, 'indirizzo', 'address', lang),
+          vat = ph(p.vat, 'P.IVA', 'VAT no.', lang), mail = ph(p.email, 'email privacy', 'privacy email', lang);
+    const h = x => '<h4 style="margin:16px 0 6px;font-size:15px">' + x + '</h4>';
+    const P = x => '<p style="margin:0 0 8px">' + x + '</p>';
+    const li = arr => '<ul style="margin:0 0 8px;padding-left:18px">' + arr.map(x => '<li style="margin-bottom:4px">' + x + '</li>').join('') + '</ul>';
+    const rows = it
+      ? [['Bryan s.r.l.', 'Fornitore dell\'applicazione Bizca', 'Italia'], ['OpenAI', 'Lettura automatica del biglietto', 'Stati Uniti'], ['Vercel Inc.', 'Hosting dell\'applicazione (server in UE)', 'Unione Europea'], ['Railway Corp.', 'Hosting del database (server in UE)', 'Unione Europea'], ['Brevo', 'Invio delle comunicazioni commerciali', 'Unione Europea']]
+      : [['Bryan s.r.l.', 'Provider of the Bizca application', 'Italy'], ['OpenAI', 'Automatic reading of the card', 'United States'], ['Vercel Inc.', 'Application hosting (EU servers)', 'European Union'], ['Railway Corp.', 'Database hosting (EU servers)', 'European Union'], ['Brevo', 'Sending commercial communications', 'European Union']];
+    const table = '<table style="width:100%;border-collapse:collapse;font-size:12.5px;margin:4px 0 8px">' +
+      '<tr>' + (it ? ['Fornitore', 'Ruolo', 'Sede'] : ['Provider', 'Role', 'Location']).map(x => '<th style="text-align:left;padding:6px 4px;border-bottom:1px solid var(--line);color:var(--muted)">' + x + '</th>').join('') + '</tr>' +
+      rows.map(r => '<tr>' + r.map((x, i) => '<td style="padding:6px 4px;border-bottom:1px solid #F1F5F9">' + (i ? x : '<b>' + x + '</b>') + '</td>').join('') + '</tr>').join('') + '</table>';
+    const body = it ? (
+      '<h3 style="margin:0 0 2px">Informativa sul trattamento dei dati personali</h3>' +
+      '<p class="hint" style="margin:0 0 10px">ai sensi degli artt. 13 e 14 del Regolamento (UE) 2016/679</p>' +
+      h('Chi tratta i tuoi dati') +
+      P('Titolare del trattamento è <b>' + co + '</b>, ' + addr + ', P.IVA ' + vat + ', email ' + mail + '.') +
+      P('Per la raccolta e la gestione dei contatti in fiera il Titolare si avvale di <b>Bryan s.r.l.</b> (Via Privata del Gonfalone 3, 20123 Milano — P.IVA 03560330130), nominata responsabile del trattamento, che fornisce l\'applicazione Bizca.') +
+      h('Quali dati raccogliamo') +
+      li(['I dati di contatto presenti sul biglietto da visita che ci hai consegnato: nome e cognome, azienda, ruolo, email, telefono, indirizzo, sito web.',
+          'Le informazioni sull\'incontro: evento, data e ora, prodotti o servizi di tuo interesse, note prese dal nostro incaricato.',
+          'La tua firma, raccolta su schermo, come prova del consenso.']) +
+      P('La fotografia del biglietto viene utilizzata solo per estrarne automaticamente i dati e <b>viene cancellata al termine dell\'operazione</b>.') +
+      h('Perché li trattiamo e su quale base') +
+      P('Trattiamo i tuoi dati per <b>ricontattarti dopo l\'evento</b> con informazioni commerciali sui nostri prodotti e servizi.') +
+      P('La base giuridica è il <b>tuo consenso</b>, che presti firmando. Puoi revocarlo in qualsiasi momento, senza che questo pregiudichi la liceità del trattamento svolto prima della revoca.') +
+      P('La conservazione della firma si fonda sul legittimo interesse del Titolare a poter dimostrare di aver raccolto un consenso valido (art. 6.1.f GDPR).') +
+      h('A chi li comunichiamo') +
+      P('I tuoi dati sono accessibili al personale autorizzato del Titolare e ai seguenti fornitori, nominati responsabili del trattamento:') + table +
+      P('Alcuni fornitori hanno sede fuori dall\'Unione Europea (in particolare OpenAI, per la lettura del biglietto). In questi casi il trasferimento avviene sulla base delle <b>clausole contrattuali tipo</b> approvate dalla Commissione Europea (art. 46.2.c GDPR).') +
+      P('I dati <b>non sono ceduti né venduti a terzi</b> per finalità proprie.') +
+      h('Per quanto tempo li conserviamo') +
+      li(['Dati di contatto e informazioni sull\'incontro: <b>fino alla revoca del consenso</b> e comunque non oltre <b>24 mesi</b> dall\'ultima interazione.',
+          'Firma: per lo stesso periodo, come prova del consenso.',
+          'Fotografia del biglietto: <b>cancellata subito dopo l\'estrazione dei dati</b>.']) +
+      h('I tuoi diritti') +
+      P('Puoi in ogni momento chiedere di <b>accedere</b> ai tuoi dati, <b>rettificarli</b>, <b>cancellarli</b>, <b>limitarne</b> il trattamento, <b>opporti</b> al trattamento, <b>riceverli in formato strutturato</b> e <b>revocare il consenso</b>.') +
+      P('Scrivi a <b>' + mail + '</b>. Ti risponderemo entro un mese.') +
+      P('Se ritieni che il trattamento violi il Regolamento puoi proporre reclamo al <b>Garante per la protezione dei dati personali</b> (www.garanteprivacy.it).') +
+      '<p class="hint" style="margin:12px 0 0">Ultimo aggiornamento: 25 novembre 2026 · versione ' + PRIVACY_VERSION + '</p>'
+    ) : (
+      '<h3 style="margin:0 0 2px">Privacy notice on the processing of personal data</h3>' +
+      '<p class="hint" style="margin:0 0 10px">under Articles 13 and 14 of Regulation (EU) 2016/679 (GDPR)</p>' +
+      h('Who processes your data') +
+      P('The data controller is <b>' + co + '</b>, ' + addr + ', VAT no. ' + vat + ', email ' + mail + '.') +
+      P('To collect and manage the contacts met at events, the controller uses <b>Bryan s.r.l.</b> (Via Privata del Gonfalone 3, 20123 Milan, Italy — VAT no. IT03560330130), appointed as data processor, which provides the Bizca application.') +
+      h('What data we collect') +
+      li(['The contact details on the business card you gave us: first and last name, company, role, email, phone, address, website.',
+          'Information about the meeting: event, date and time, products or services you are interested in, notes taken by our representative.',
+          'Your signature, captured on screen, as proof of consent.']) +
+      P('The photo of the card is used only to extract the details automatically and <b>is deleted as soon as that is done</b>.') +
+      h('Why we process it and on what legal basis') +
+      P('We process your data to <b>contact you after the event</b> with commercial information about our products and services.') +
+      P('The legal basis is <b>your consent</b>, given by signing. You can withdraw it at any time; this does not affect the lawfulness of processing carried out before the withdrawal.') +
+      P('Keeping the signature is based on the controller\'s legitimate interest in being able to prove that valid consent was obtained (Art. 6(1)(f) GDPR).') +
+      h('Who we share it with') +
+      P('Your data can be accessed by the controller\'s authorised staff and by the following providers, appointed as data processors:') + table +
+      P('Some providers are based outside the European Union (in particular OpenAI, for reading the card). In those cases the transfer relies on the <b>standard contractual clauses</b> adopted by the European Commission (Art. 46(2)(c) GDPR).') +
+      P('Your data is <b>never sold or passed on to third parties</b> for their own purposes.') +
+      h('How long we keep it') +
+      li(['Contact details and meeting information: <b>until you withdraw your consent</b>, and in any case no longer than <b>24 months</b> after the last interaction.',
+          'Signature: for the same period, as proof of consent.',
+          'Photo of the card: <b>deleted right after the details are extracted</b>.']) +
+      h('Your rights') +
+      P('At any time you can ask to <b>access</b> your data, <b>correct</b> it, <b>erase</b> it, <b>restrict</b> or <b>object to</b> its processing, <b>receive it in a structured format</b> and <b>withdraw your consent</b>.') +
+      P('Write to <b>' + mail + '</b>. We will reply within one month.') +
+      P('If you believe the processing breaches the Regulation, you can lodge a complaint with the Italian Data Protection Authority, <b>Garante per la protezione dei dati personali</b> (www.garanteprivacy.it), or with the authority of your country.') +
+      '<p class="hint" style="margin:12px 0 0">Last updated: 25 November 2026 · version ' + PRIVACY_VERSION + '</p>'
+    );
+    return '<div style="font-size:13.5px;line-height:1.5;color:var(--ink)">' + body + '</div>';
+  }
+
+  function showNotice(lang) {
+    modal('<div class="tags" style="justify-content:flex-end;margin:-4px 0 6px">' +
+        ['it', 'en'].map(x => '<button class="pill ' + (x === lang ? 'indigo' : 'gray') + '" data-nlang="' + x + '" style="border:none;cursor:pointer">' + x.toUpperCase() + '</button>').join('') + '</div>' +
+      noticeFullHtml(lang) +
+      '<button class="btn primary" onclick="closeModal()" style="margin-top:14px">' + esc(lang === 'it' ? 'Chiudi' : 'Close') + '</button>');
+    modalRoot.querySelectorAll('[data-nlang]').forEach(b => b.onclick = () => showNotice(b.getAttribute('data-nlang')));
+  }
+  window.__bizcaNotice = { version: PRIVACY_VERSION, full: noticeFullHtml, short: consentShortHtml };
+
   function consentCard(l, readOnly) {
+    if (consentCard._id !== l.id) { consentCard._id = l.id; consentLang = null; }   // each contact starts in the app language
     const has = !!l.consentAt;
     const when = has ? new Date(l.consentAt).toLocaleString(I18N.lang === 'it' ? 'it-IT' : 'en-GB') : '';
+    const it = I18N.lang === 'it';
+    const ver = l.consentVersion ? '<p class="hint" style="margin:4px 0 0">' + esc(it ? 'Informativa accettata: versione ' : 'Privacy notice accepted: version ') + esc(l.consentVersion) + '</p>' : '';
     if (readOnly) {
       return '<div class="card"><h3>'+esc(t('Consent'))+'</h3>' + (has
-        ? '<div class="tags"><span class="pill green">'+ic.check+' '+esc(t('Consent signed'))+'</span></div><p class="hint" style="margin:8px 0 0">'+esc(when)+'</p>' + (imgSrc(l.consentSignature) ? '<img src="'+imgSrc(l.consentSignature)+'" alt="signature" style="margin-top:8px;max-height:90px;border:1px solid var(--line);border-radius:10px;background:#fff">' : '')
+        ? '<div class="tags"><span class="pill green">'+ic.check+' '+esc(t('Consent signed'))+'</span></div><p class="hint" style="margin:8px 0 0">'+esc(when)+'</p>' + ver + (imgSrc(l.consentSignature) ? '<img src="'+imgSrc(l.consentSignature)+'" alt="signature" style="margin-top:8px;max-height:90px;border:1px solid var(--line);border-radius:10px;background:#fff">' : '')
         : '<p class="hint">'+esc(t('No consent captured.'))+'</p>') + '</div>';
     }
     const req = DB.requireConsent;
-    return '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h3>'+esc(t('Consent'))+(req?' <span class="req">*</span>':'')+'</h3>'+(has?'<span class="pill green">'+ic.check+' '+esc(t('signed'))+'</span>':'')+'</div>' +
-      '<p class="hint">'+esc(I18N.lang === 'it' ? 'Il contatto acconsente a essere ricontattato da '+DB.company.name+' riguardo ai prodotti e servizi di cui avete parlato. Firma qui sotto.' : 'The contact agrees to be contacted by '+DB.company.name+' about the products and services discussed. Sign below.')+'</p>' +
+    const lang = consentLang || (it ? 'it' : 'en');
+    const langSwitch = '<div class="tags" style="gap:6px">' + ['it', 'en'].map(x =>
+      '<button class="pill ' + (x === lang ? 'indigo' : 'gray') + '" data-clang="' + x + '" style="border:none;cursor:pointer">' + x.toUpperCase() + '</button>').join('') + '</div>';
+    const missing = privacyComplete() ? '' : '<div class="banner" style="margin:10px 0 0;background:#FFFBEB;border-color:#FDE68A;color:#92400E">' + ic.info + '<div>' + esc(it
+        ? 'Mancano alcuni dati dell\'azienda per l\'informativa (ragione sociale, indirizzo, P.IVA, email privacy). ' + (isAdmin() ? 'Inseriscili in Admin → Privacy.' : 'Chiedi all\'admin di inserirli in Admin → Privacy.')
+        : 'Some company details for the privacy notice are missing (company name, address, VAT no., privacy email). ' + (isAdmin() ? 'Add them in Admin → Privacy.' : 'Ask your admin to add them in Admin → Privacy.')) + '</div></div>';
+    return '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3 style="margin:0">'+esc(t('Consent'))+(req?' <span class="req">*</span>':'')+'</h3>' +
+        (has ? '<span class="pill green">'+ic.check+' '+esc(t('signed'))+'</span>' : langSwitch) + '</div>' +
+      '<div class="consent-text" style="font-size:13.5px;line-height:1.45;color:var(--slate);margin:12px 0 8px">' + consentShortHtml(has && l.consentVersion ? (l.consentVersion.split('/')[1] || lang) : lang) + '</div>' +
+      '<button class="back" id="readNotice" style="font-size:14px;margin-bottom:4px">→ ' + esc(lang === 'it' ? 'Leggi l\'informativa completa' : 'Read the full privacy notice') + '</button>' +
+      missing +
       (has && imgSrc(l.consentSignature)
-        ? '<img src="'+imgSrc(l.consentSignature)+'" alt="signature" style="width:100%;max-height:120px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#fff">' +
+        ? '<img src="'+imgSrc(l.consentSignature)+'" alt="signature" style="width:100%;max-height:120px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#fff;margin-top:10px">' +
           '<button class="btn ghost sm" id="reSign" style="margin-top:10px">'+esc(t('Re-sign'))+'</button>'
-        : '<canvas id="sigPad" style="width:100%;height:150px;border:1.5px dashed var(--line);border-radius:12px;background:#fff;touch-action:none"></canvas>' +
+        : '<label class="select-item" for="privAck" style="cursor:pointer;margin:12px 0 10px">' +
+            '<input type="checkbox" id="privAck" style="width:20px;height:20px;accent-color:var(--indigo)">' +
+            '<span style="font-size:13px;color:var(--ink)">' + esc(lang === 'it'
+              ? 'Ho letto l\'informativa e acconsento al trattamento dei miei dati per finalità di marketing.'
+              : 'I have read the privacy notice and consent to the processing of my data for marketing purposes.') + '</span></label>' +
+          '<canvas id="sigPad" style="width:100%;height:150px;border:1.5px dashed var(--line);border-radius:12px;background:#fff;touch-action:none"></canvas>' +
           '<div class="btnrow" style="margin-top:10px"><button class="btn ghost sm" id="sigClear">'+esc(t('Clear'))+'</button><button class="btn soft sm" id="sigSave">'+esc(t('Save signature'))+'</button></div>') +
-      (has ? '<p class="hint" style="margin:8px 0 0">'+esc(I18N.lang === 'it' ? 'Firmato il ' : 'Signed ')+esc(when)+'</p>' : '') +
+      (has ? '<p class="hint" style="margin:8px 0 0">'+esc(it ? 'Firmato il ' : 'Signed ')+esc(when)+'</p>' + ver : '') +
       newsletterTick(l, readOnly) +
       '</div>';
+  }
+
+  // Language switch and full notice, bound after each render of the lead screen.
+  function bindConsent(l) {
+    app.querySelectorAll('[data-clang]').forEach(b => b.onclick = () => { consentLang = b.getAttribute('data-clang'); leadScreen(l.id); });
+    const rn = document.getElementById('readNotice');
+    if (rn) rn.onclick = () => showNotice(l.consentAt && l.consentVersion ? (l.consentVersion.split('/')[1] || 'it') : (consentLang || (I18N.lang === 'it' ? 'it' : 'en')));
   }
 
   function initSigPad(l) {
@@ -1140,8 +1289,12 @@
     cv.addEventListener('pointerup', () => { drawing = false; });
     const clr = $('#sigClear'); if (clr) clr.onclick = () => { ctx.clearRect(0, 0, cv.width, cv.height); dirty = false; };
     const save = $('#sigSave'); if (save) save.onclick = () => {
+      const ack = $('#privAck');
+      if (ack && !ack.checked) { toast(I18N.lang === 'it' ? 'Prima va spuntata la presa visione dell\'informativa' : 'Tick the privacy notice box first', 'err'); ack.focus(); return; }
       if (!dirty) { toast(t('Please sign first'), 'err'); return; }
-      l.consentSignature = cv.toDataURL('image/png'); l.consentAt = Date.now(); saveState(); saveLead(l); toast(t('Consent captured'), 'ok'); leadScreen(l.id);
+      const lang = consentLang || (I18N.lang === 'it' ? 'it' : 'en');
+      l.consentSignature = cv.toDataURL('image/png'); l.consentAt = Date.now(); l.consentVersion = PRIVACY_VERSION + '/' + lang;
+      saveState(); saveLead(l); toast(t('Consent captured'), 'ok'); leadScreen(l.id);
     };
   }
   function optList(arr, sel, label) {
@@ -1153,6 +1306,7 @@
     if (sending.has(l.id)) return;     // a second tap, or a re-render mid-send
     if (!requiredFilled(l)) { toast(t('Fill all required qualification fields'), 'err'); return; }
     if (DB.requireConsent && !l.consentAt) { toast(t('Consent signature required before sending'), 'err'); return; }
+    dropPhoto(l);
     if (!S.online) { l.status = 'Ready'; l.queuedOffline = true; saveLead(l); toast(t('Offline — queued, will sync automatically'), ''); go('#/leads'); return; }
     const btn = $('#send'); if (btn){ btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> ' + esc(t('Sending…')); }
     sending.add(l.id); window.__bizcaBusy = true;
@@ -1184,6 +1338,7 @@
       if (!l) continue;
       if (l.status === 'Sent') { r.already++; continue; }
       if (!requiredFilled(l) || (DB.requireConsent && !l.consentAt)) { r.skip++; continue; }
+      dropPhoto(l);
       if (!S.online) { l.status = 'Ready'; l.queuedOffline = true; saveLead(l); r.queued++; continue; }
       if (sending.has(l.id)) continue;
       sending.add(l.id); window.__bizcaBusy = true;
@@ -1382,7 +1537,9 @@
       [t('Team & access'), tp('n_users', DB.users.length), '#/admin/team', ic.leads],
       [t('Sources'), tp('n_values', pick('provenienza').length), '#/admin/sources', ic.grid],
       [t('Segments'), tp('n_values', pick('interesse').length), '#/admin/segments', ic.grid],
-      [t('Destinations'), (DB.brevoApiKey?t('Brevo connected'):t('Brevo not configured')), '#/admin/dest', ic.send]
+      [t('Destinations'), (DB.brevoApiKey?t('Brevo connected'):t('Brevo not configured')), '#/admin/dest', ic.send],
+      ['Privacy', privacyComplete() ? (I18N.lang === 'it' ? 'Dati per l\'informativa completi' : 'Privacy notice details complete')
+                                    : (I18N.lang === 'it' ? 'Mancano dati per l\'informativa' : 'Privacy notice details missing'), '#/admin/privacy', ic.info]
     ];
     const body =
       rows.map(r => '<button class="rowbtn" data-nav="'+r[2]+'"><div class="lead-ic">'+r[3]+'</div><div style="flex:1"><div style="font-weight:600">'+esc(r[0])+'</div><div class="hint" style="margin:0">'+esc(r[1])+'</div></div>'+ic.chevR+'</button>').join('') +
@@ -1393,6 +1550,36 @@
     shell(t('Admin'), DB.company.name, body, '#/admin', { bind(){
       bindLangCard();
       $('#resetDemo').onclick = () => modal('<h3>'+esc(t('Reset app data?'))+'</h3><p class="hint">'+esc(t('This clears all locally-saved leads and settings on this device. It does not affect Brevo.'))+'</p><button class="btn danger" id="doReset">'+esc(t('Yes, reset'))+'</button><button class="btn ghost" onclick="closeModal()" style="margin-top:8px">'+esc(t('Cancel'))+'</button>') || setTimeout(()=>{ const b=document.getElementById('doReset'); if(b) b.onclick=resetState; },0);
+    }});
+  }
+
+  /* Company details printed in the privacy notice the contact sees before signing. */
+  function adminPrivacy() {
+    const it = I18N.lang === 'it';
+    const p = DB.privacy || {};
+    const f = (id, label, val, ph, type) => '<div class="field"><label>' + esc(label) + '</label><input class="input" id="' + id + '" value="' + esc(val || '') + '" placeholder="' + esc(ph) + '"' + (type ? ' type="' + type + '"' : '') + '></div>';
+    const body =
+      '<div class="banner">' + ic.info + '<div>' + esc(it
+        ? 'Questi dati compaiono nell\'informativa che il contatto legge prima di firmare: la vostra azienda è titolare del trattamento, Bryan è responsabile perché fornisce Bizca.'
+        : 'These details appear in the privacy notice the contact reads before signing: your company is the data controller, Bryan the processor providing Bizca.') + '</div></div>' +
+      '<div class="card">' +
+        f('pvName', it ? 'Ragione sociale' : 'Company legal name', p.legalName || DB.company.name, it ? 'ACME S.r.l.' : 'ACME Ltd') +
+        f('pvAddr', it ? 'Indirizzo della sede' : 'Registered address', p.address, it ? 'Via Roma 1, 20100 Milano' : '1 High Street, London') +
+        f('pvVat', it ? 'Partita IVA' : 'VAT number', p.vat, 'IT01234567890') +
+        f('pvMail', it ? 'Email per la privacy' : 'Privacy email', p.email, 'privacy@' + (DB.company.domain || 'azienda.it'), 'email') +
+        '<p class="hint" style="margin:-4px 0 12px">' + esc(it ? 'A questo indirizzo i contatti scrivono per revocare il consenso o esercitare i loro diritti.' : 'Contacts write to this address to withdraw consent or exercise their rights.') + '</p>' +
+        '<div class="btnrow"><button class="btn ghost" id="pvPrev">' + esc(it ? 'Anteprima' : 'Preview') + '</button><button class="btn primary" id="pvSave">' + esc(it ? 'Salva' : 'Save') + '</button></div>' +
+      '</div>' +
+      '<p class="hint" style="text-align:center">' + esc(it ? 'Versione dell\'informativa in uso: ' : 'Privacy notice version in use: ') + PRIVACY_VERSION + '</p>';
+    shell('Privacy', DB.company.name, body, null, { back:'#/admin', bind(){
+      const read = () => ({ legalName: $('#pvName').value.trim(), address: $('#pvAddr').value.trim(), vat: $('#pvVat').value.trim(), email: $('#pvMail').value.trim() });
+      $('#pvPrev').onclick = () => { const keep = DB.privacy; DB.privacy = read(); showNotice(it ? 'it' : 'en'); DB.privacy = keep; };
+      $('#pvSave').onclick = async () => {
+        const v = read();
+        if (v.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.email)) { toast(it ? 'Email non valida' : 'Invalid email', 'err'); return; }
+        try { await api('PATCH', '/settings', { privacy: v }); DB.privacy = v; saveState(); toast(it ? 'Salvato' : 'Saved', 'ok'); go('#/admin'); }
+        catch (e) { toast(e.message, 'err'); }
+      };
     }});
   }
 
@@ -1881,6 +2068,7 @@
       case '#/admin/sources': return adminPickList('provenienza');
       case '#/admin/segments': return adminPickList('interesse');
       case '#/admin/dest': return adminDest();
+      case '#/admin/privacy': return adminPrivacy();
       case '#/admin/events': return adminEvents();
       default: return go('#/home');
     }

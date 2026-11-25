@@ -140,3 +140,8 @@ CREATE INDEX IF NOT EXISTS super_audit_at_idx ON super_audit (at DESC);
 -- Extra email domains of a company (the main one stays in "domain"). Set by a
 -- Bryan superadmin only; used to recognise new people who sign in with Microsoft.
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS extra_domains JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- Privacy (25 Nov 2026): the card photo is never kept. Clear any stored before.
+UPDATE leads SET card_image = NULL WHERE card_image IS NOT NULL;
+-- Which version of the privacy notice the contact accepted when signing (e.g. 2026-11-25/it).
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS consent_version TEXT;

@@ -26,7 +26,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-11-04-msjoin1';
+const BUILD = '2026-11-25-privacy1';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth', 'super'];
 
 const pool = new Pool({
@@ -143,8 +143,9 @@ const outLead = r => ({
   first: r.first_name, last: r.last_name, company: r.company_name, role: r.role_title,
   email: r.email, phone: r.phone, website: r.website, address: r.address,
   provenienza: r.source, country: r.country, interesse: r.segment,
-  status: r.status, override: r.override_flag, error: r.error, image: r.card_image,
+  status: r.status, override: r.override_flag, error: r.error,   // the card photo is never stored, never sent back
   consentAt: r.consent_at ? new Date(r.consent_at).getTime() : null, consentSignature: r.consent_sig,
+  consentVersion: r.consent_version || null,
   newsletter: !!r.newsletter, captureType: r.capture_type || null, brevoListId: r.brevo_list_id,
   ts: new Date(r.captured_at).getTime()
 });
@@ -307,7 +308,7 @@ app.get('/state', auth, wrap(async (req, res) => {
   const s = c.settings || {};
   res.json({
     company: { id: c.id, name: c.name, domain: c.domain, extraDomains: Array.isArray(c.extra_domains) ? c.extra_domains : [], locale: c.locale || 'en', configured: true },
-    settings: { msAutoJoin: s.msAutoJoin === true, autoSend: s.autoSend !== false, requireConsent: !!s.requireConsent, allowOverride: s.allowOverride !== false, brevoApiKey: s.brevoApiKey || '', fallbackOwner: s.fallbackOwner || null, newsletterListId: s.newsletterListId || null },
+    settings: { privacy: s.privacy || null, msAutoJoin: s.msAutoJoin === true, autoSend: s.autoSend !== false, requireConsent: !!s.requireConsent, allowOverride: s.allowOverride !== false, brevoApiKey: s.brevoApiKey || '', fallbackOwner: s.fallbackOwner || null, newsletterListId: s.newsletterListId || null },
     // Microsoft/Excel config is admin-only, and never carries the client secret
     ms: req.session.role === 'admin' ? ms.publicCfg(s)
         : (pc => ({ enabled: pc.enabled, ready: pc.ready, fileName: pc.fileName }))(ms.publicCfg(s)),
@@ -332,6 +333,13 @@ app.patch('/settings', auth, requireAdmin, wrap(async (req, res) => {
   // Microsoft settings have their own validated route (/ms/config); never here.
   delete body.ms;
   if (body.msAutoJoin !== undefined) body.msAutoJoin = body.msAutoJoin === true;
+  // Company details printed in the privacy notice shown to contacts before they sign.
+  if (body.privacy !== undefined) {
+    const p = body.privacy || {};
+    const c = (v, n) => String(v == null ? '' : v).trim().slice(0, n);
+    body.privacy = { legalName: c(p.legalName, 200), address: c(p.address, 300), vat: c(p.vat, 40), email: c(p.email, 200) };
+    if (body.privacy.email && !isEmail(body.privacy.email)) return res.status(400).json({ error: 'Invalid privacy email' });
+  }
   const cur = await pool.query('SELECT settings FROM companies WHERE id=$1', [req.session.cid]);
   const merged = Object.assign({}, cur.rows[0].settings || {}, body);
   await pool.query('UPDATE companies SET settings=$1 WHERE id=$2', [merged, req.session.cid]);
@@ -507,8 +515,8 @@ app.delete('/rules/:rid', auth, requireAdmin, wrap(async (req, res) => {
 
 /* ---------- leads ---------- */
 const LEAD_STATUSES = ['Captured', 'To finalize', 'Ready', 'Sent', 'Error'];
-const MAX_IMAGE = 3 * 1024 * 1024;   // a downscaled card photo is ~150 KB; this is a generous ceiling
-// Only our own downscaled photos and signatures: a data URL of an image, nothing else.
+const MAX_IMAGE = 3 * 1024 * 1024;   // a signature is a few KB; this is a generous ceiling
+// Only our own signatures: a data URL of an image, nothing else.
 const safeImage = v => (typeof v === 'string' && /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/.test(v) && v.length <= MAX_IMAGE) ? v : null;
 
 app.put('/leads/:lid', auth, wrap(async (req, res) => {
@@ -536,13 +544,13 @@ app.put('/leads/:lid', auth, wrap(async (req, res) => {
   const clip = (v, n) => String(v == null ? '' : v).slice(0, n);
 
   const r = await pool.query(
-    `INSERT INTO leads (id,company_id,event_id,owner_id,created_by,first_name,last_name,company_name,role_title,email,phone,website,address,source,country,segment,status,override_flag,error,card_image,consent_at,consent_sig,newsletter,capture_type,brevo_list_id,captured_at,updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,to_timestamp($26/1000.0),now())
+    `INSERT INTO leads (id,company_id,event_id,owner_id,created_by,first_name,last_name,company_name,role_title,email,phone,website,address,source,country,segment,status,override_flag,error,card_image,consent_at,consent_sig,newsletter,capture_type,brevo_list_id,captured_at,updated_at,consent_version)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,to_timestamp($26/1000.0),now(),$27)
      ON CONFLICT (id) DO UPDATE SET event_id=EXCLUDED.event_id, owner_id=EXCLUDED.owner_id, first_name=EXCLUDED.first_name,
        last_name=EXCLUDED.last_name, company_name=EXCLUDED.company_name, role_title=EXCLUDED.role_title, email=EXCLUDED.email,
        phone=EXCLUDED.phone, website=EXCLUDED.website, address=EXCLUDED.address, source=EXCLUDED.source, country=EXCLUDED.country,
        segment=EXCLUDED.segment, status=EXCLUDED.status, override_flag=EXCLUDED.override_flag, error=EXCLUDED.error,
-       card_image=EXCLUDED.card_image, consent_at=EXCLUDED.consent_at, consent_sig=EXCLUDED.consent_sig,
+       card_image=NULL, consent_at=EXCLUDED.consent_at, consent_sig=EXCLUDED.consent_sig, consent_version=EXCLUDED.consent_version,
        newsletter=EXCLUDED.newsletter, capture_type=EXCLUDED.capture_type, brevo_list_id=EXCLUDED.brevo_list_id, updated_at=now()
      WHERE leads.company_id = EXCLUDED.company_id
      RETURNING id`,
@@ -550,10 +558,12 @@ app.put('/leads/:lid', auth, wrap(async (req, res) => {
      clip(l.first, 200), clip(l.last, 200), clip(l.company, 300), clip(l.role, 200), clip(l.email, 320),
      clip(l.phone, 80), clip(l.website, 300), clip(l.address, 500),
      clip(l.provenienza, 100), clip(l.country, 100), clip(l.interesse, 1000), status, !!l.override, l.error ? clip(l.error, 500) : null,
-     safeImage(l.image), l.consentAt ? new Date(l.consentAt) : null, safeImage(l.consentSignature),
+     null,   // privacy: the card photo is used to read the card on the phone and is never stored
+     l.consentAt ? new Date(l.consentAt) : null, safeImage(l.consentSignature),
      !!l.newsletter, ['event', 'meeting'].indexOf(l.captureType) >= 0 ? l.captureType : null,
      Number.isFinite(parseInt(l.brevoListId, 10)) ? parseInt(l.brevoListId, 10) : null,
-     Number.isFinite(Number(l.ts)) ? Number(l.ts) : Date.now()]
+     Number.isFinite(Number(l.ts)) ? Number(l.ts) : Date.now(),
+     l.consentAt && l.consentVersion ? clip(l.consentVersion, 40) : null]
   );
   // No row back means the id already belongs to another company: refuse, never overwrite.
   if (!r.rowCount) return res.status(409).json({ error: 'This lead id is already in use' });
