@@ -58,6 +58,7 @@ const HEADER_MAP = {
   stato: 'status', status: 'status',
   consenso: 'consent', consent: 'consent', consensodata: 'consent', consentdate: 'consent', dataconsenso: 'consent',
   newsletter: 'newsletter', consensonewsletter: 'newsletter',
+  tracking: 'tracking', emailtracking: 'tracking', trackingemail: 'tracking', consensotracking: 'tracking', tracciamento: 'tracking',
   note: 'notes', notes: 'notes'
 };
 
@@ -252,6 +253,7 @@ async function leadValues(pool, cid, lead) {
     status: lead.status || '',
     consent: isoDate(lead.consent_at),
     newsletter: lead.newsletter ? 'x' : '',
+    tracking: lead.email_tracking ? 'x' : '',
     notes: ''
   };
 }
@@ -384,7 +386,7 @@ function mount(app, deps) {
           fullname: 'Bizca Test', company: 'Bizca', role: 'Connection check',
           email: 'test@bizca.local', phone: '', website: '', address: '',
           source: 'Bizca', country: 'IT', segment: '', owner: '', createdby: '',
-          status: 'Test row — safe to delete', consent: '', newsletter: '', notes: ''
+          status: 'Test row — safe to delete', consent: '', newsletter: '', tracking: '', notes: ''
         };
         await appendRow(token, cfg, rowFor(headers, sample), fetchImpl);
         wrote = true;

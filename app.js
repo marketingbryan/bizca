@@ -275,7 +275,7 @@
           first: l.first, last: l.last, company: l.company, role: l.role, email: l.email,
           phone: l.phone, website: l.website, address: l.address,
           provenienza: l.provenienza, country: l.country, interesse: l.interesse, event: evName, owner: ownerName,
-          newsletter: !!l.newsletter,
+          newsletter: !!l.newsletter, emailTracking: !!l.emailTracking,
           consent: l.consentAt ? new Date(l.consentAt).toISOString().slice(0, 10) : ''
         } })
       });
@@ -1059,6 +1059,7 @@
       if (ow) ow.onchange = () => { l.ownerId = ow.value; saveState(); saveLead(l); toast(t('Assigned to') + ' ' + userName(l.ownerId), 'ok'); };
       bindSegChips(l, () => { saveLead(l); leadScreen(l.id); });
       const nk = $('#newsOk'); if (nk) nk.onchange = () => { l.newsletter = nk.checked; saveState(); saveLead(l); };
+      const tk = $('#trackOk'); if (tk) tk.onchange = () => { l.emailTracking = tk.checked; saveState(); saveLead(l); };
       const sd = $('#saveDraft'); if (sd) sd.onclick = () => { l.status = requiredFilled(l)?'Ready':'To finalize'; dropPhoto(l); saveState(); saveLead(l); toast(t('Draft saved'),'ok'); go('#/leads'); };
       const sb = $('#send'); if (sb) sb.onclick = () => sendLead(l);
       const rs = $('#reSign'); if (rs) rs.onclick = () => { l.consentSignature = null; l.consentAt = null; l.consentVersion = null; saveState(); saveLead(l); leadScreen(l.id); };
@@ -1069,6 +1070,24 @@
 
   /* A second, separate consent: being contacted about what you discussed is not
      the same as subscribing to a newsletter, so it needs its own unticked box. */
+  /* Third, separate and optional consent: measuring email opens and link clicks.
+     Unticked by default; it travels to Brevo as BIZCA_TRACKING yes/no. */
+  function trackingTick(l, readOnly) {
+    const on = !!l.emailTracking;
+    const lang = readOnly ? (I18N.lang === 'it' ? 'it' : 'en') : (consentLang || (I18N.lang === 'it' ? 'it' : 'en'));
+    const co = privacyInfo().name || DB.company.name;
+    if (readOnly) {
+      return '<div class="kv" style="border:none;margin-top:4px"><span class="k">' + esc(lang === 'it' ? 'Tracciamento email' : 'Email tracking') + '</span>' +
+        '<span class="v">' + (on ? '<span class="pill green">' + ic.check + ' ' + esc(lang === 'it' ? 'acconsentito' : 'agreed') + '</span>'
+                                 : '<span class="pill gray">' + esc(lang === 'it' ? 'non acconsentito' : 'not agreed') + '</span>') + '</span></div>';
+    }
+    return '<label class="select-item" for="trackOk" style="cursor:pointer">' +
+      '<input type="checkbox" id="trackOk" ' + (on ? 'checked' : '') + ' style="width:20px;height:20px;accent-color:var(--indigo)">' +
+      '<span style="font-size:13px;color:var(--slate)">' + esc(lang === 'it'
+        ? 'Acconsento a che ' + co + ' rilevi l\'apertura delle email e i clic sui link, per inviarmi comunicazioni più pertinenti.'
+        : 'I agree that ' + co + ' may record when I open its emails and click their links, to send me more relevant communications.') + '</span></label>';
+  }
+
   function newsletterTick(l, readOnly) {
     const on = !!l.newsletter;
     if (readOnly) {
@@ -1125,7 +1144,7 @@
      The exhibiting company is the data controller, Bryan the processor. The
      company details come from Admin → Privacy. When the text changes, bump
      PRIVACY_VERSION: every signature stores the version it was given under. */
-  const PRIVACY_VERSION = '2026-11-25';
+  const PRIVACY_VERSION = '2026-11-25.2';
   let consentLang = null;              // language of the notice shown to the contact (IT/EN switch)
   function privacyInfo() {
     const p = DB.privacy || {};
@@ -1169,11 +1188,13 @@
       h('Quali dati raccogliamo') +
       li(['I dati di contatto presenti sul biglietto da visita che ci hai consegnato: nome e cognome, azienda, ruolo, email, telefono, indirizzo, sito web.',
           'Le informazioni sull\'incontro: evento, data e ora, prodotti o servizi di tuo interesse, note prese dal nostro incaricato.',
-          'La tua firma, raccolta su schermo, come prova del consenso.']) +
+          'La tua firma, raccolta su schermo, come prova del consenso.',
+          'Solo se lo consenti con l\'apposita casella: l\'apertura delle nostre email e i clic sui link che contengono.']) +
       P('La fotografia del biglietto viene utilizzata solo per estrarne automaticamente i dati e <b>viene cancellata al termine dell\'operazione</b>.') +
       h('Perché li trattiamo e su quale base') +
       P('Trattiamo i tuoi dati per <b>ricontattarti dopo l\'evento</b> con informazioni commerciali sui nostri prodotti e servizi.') +
       P('La base giuridica è il <b>tuo consenso</b>, che presti firmando. Puoi revocarlo in qualsiasi momento, senza che questo pregiudichi la liceità del trattamento svolto prima della revoca.') +
+      P('Solo con il tuo <b>consenso specifico e facoltativo</b>, rileviamo l\'apertura delle email e i clic sui link (tramite Brevo) per capire quali comunicazioni ti interessano. Se non lo dai, ricevi comunque le comunicazioni a cui hai acconsentito; puoi revocarlo in qualsiasi momento.') +
       P('La conservazione della firma si fonda sul legittimo interesse del Titolare a poter dimostrare di aver raccolto un consenso valido (art. 6.1.f GDPR).') +
       h('A chi li comunichiamo') +
       P('I tuoi dati sono accessibili al personale autorizzato del Titolare e ai seguenti fornitori, nominati responsabili del trattamento:') + table +
@@ -1197,11 +1218,13 @@
       h('What data we collect') +
       li(['The contact details on the business card you gave us: first and last name, company, role, email, phone, address, website.',
           'Information about the meeting: event, date and time, products or services you are interested in, notes taken by our representative.',
-          'Your signature, captured on screen, as proof of consent.']) +
+          'Your signature, captured on screen, as proof of consent.',
+          'Only if you allow it with the dedicated box: whether you open our emails and click the links in them.']) +
       P('The photo of the card is used only to extract the details automatically and <b>is deleted as soon as that is done</b>.') +
       h('Why we process it and on what legal basis') +
       P('We process your data to <b>contact you after the event</b> with commercial information about our products and services.') +
       P('The legal basis is <b>your consent</b>, given by signing. You can withdraw it at any time; this does not affect the lawfulness of processing carried out before the withdrawal.') +
+      P('Only with your <b>specific, optional consent</b>, we record whether you open our emails and click their links (through Brevo) to understand which communications interest you. If you do not give it, you still receive the communications you agreed to; you can withdraw it at any time.') +
       P('Keeping the signature is based on the controller\'s legitimate interest in being able to prove that valid consent was obtained (Art. 6(1)(f) GDPR).') +
       h('Who we share it with') +
       P('Your data can be accessed by the controller\'s authorised staff and by the following providers, appointed as data processors:') + table +
@@ -1238,7 +1261,7 @@
     if (readOnly) {
       return '<div class="card"><h3>'+esc(t('Consent'))+'</h3>' + (has
         ? '<div class="tags"><span class="pill green">'+ic.check+' '+esc(t('Consent signed'))+'</span></div><p class="hint" style="margin:8px 0 0">'+esc(when)+'</p>' + ver + (imgSrc(l.consentSignature) ? '<img src="'+imgSrc(l.consentSignature)+'" alt="signature" style="margin-top:8px;max-height:90px;border:1px solid var(--line);border-radius:10px;background:#fff">' : '')
-        : '<p class="hint">'+esc(t('No consent captured.'))+'</p>') + '</div>';
+        : '<p class="hint">'+esc(t('No consent captured.'))+'</p>') + newsletterTick(l, true) + trackingTick(l, true) + '</div>';
     }
     const req = DB.requireConsent;
     const lang = consentLang || (it ? 'it' : 'en');
@@ -1263,7 +1286,7 @@
           '<canvas id="sigPad" style="width:100%;height:150px;border:1.5px dashed var(--line);border-radius:12px;background:#fff;touch-action:none"></canvas>' +
           '<div class="btnrow" style="margin-top:10px"><button class="btn ghost sm" id="sigClear">'+esc(t('Clear'))+'</button><button class="btn soft sm" id="sigSave">'+esc(t('Save signature'))+'</button></div>') +
       (has ? '<p class="hint" style="margin:8px 0 0">'+esc(it ? 'Firmato il ' : 'Signed ')+esc(when)+'</p>' + ver : '') +
-      newsletterTick(l, readOnly) +
+      newsletterTick(l, readOnly) + trackingTick(l, readOnly) +
       '</div>';
   }
 

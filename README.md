@@ -115,6 +115,7 @@ Indirizzo: **https://bizca.bryan.it/super.html**. Pagina separata dall'app (`sup
 - **Foto del biglietto**: serve solo a leggere i dati (va a OpenAI tramite `api/scan`) e resta sul telefono finché il lead è in revisione (`_review`). Quando il lead viene confermato (Salva bozza o Invia) sparisce dalla memoria e dalla cache locale. Il server non la riceve né la salva: `card_image` resta sempre vuoto e `schema.sql` cancella quelle vecchie.
 - **Firma**: con la memoria del telefono piena si tolgono prima le foto. Una firma si toglie dalla cache solo se il server l'ha già ricevuta.
 - **Consenso**: sopra la firma c'è il testo breve dell'informativa, con il link a quella completa (IT/EN, compilata con i dati di Admin → Privacy) e la casella «Ho letto l'informativa…». Ogni firma salva la versione accettata in `leads.consent_version`, per esempio `2026-11-25/it`. Se cambi il testo, alza `PRIVACY_VERSION` in `app.js`.
+- **Tracciamento email**: terza casella, facoltativa e non spuntata, sotto la newsletter. Si salva in `leads.email_tracking`, va in Brevo come `BIZCA_TRACKING` (yes/no) e in Excel solo se il file ha una colonna «Tracking».
 - **Privacy policy degli utenti**: `privacy/index.html` (IT) e `privacy/en/index.html` (EN), online su bizca.bryan.it/privacy.
 
 ## Regole da non rompere

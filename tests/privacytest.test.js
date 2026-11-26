@@ -77,6 +77,18 @@ const cache=()=>JSON.parse(globalThis.__w.localStorage.getItem('bizca-state-v1')
   txt=b.w.document.querySelector('.consent-text').textContent;
   ck(/By signing, you agree to be contacted by VID S\.p\.A\./.test(txt),'il contatto può leggere il testo in inglese');
 
+  // 4b. consenso al tracciamento delle email: separato, facoltativo, non spuntato
+  const tk=b.w.document.getElementById('trackOk');
+  ck(tk && !tk.checked,'c\'è la casella del tracciamento email, non spuntata');
+  tk.checked=true; tk.dispatchEvent(new b.w.Event('change')); await wait(150);
+  ck(b.w.DB.leads.find(x=>x.id==='lc').emailTracking===true,'spuntata, il lead registra il consenso al tracciamento');
+  ck(b.calls.some(c=>c.m==='PUT'&&/\/leads\/lc/.test(c.p)&&c.b.emailTracking===true),'e lo salva sul server');
+  b.w.document.getElementById('send').click(); await wait(400);
+  const sb=b.calls.find(c=>/send-brevo/.test(c.p));
+  ck(sb && sb.b.lead.emailTracking===true,'e lo manda a Brevo');
+  b.w.document.querySelector('[data-clang]') ; b.w.location.hash='#/lead?id=lc'; await wait(200);
+  ck(/Tracciamento email/.test(b.w.document.body.textContent),'il lead inviato mostra il consenso al tracciamento');
+
   // 5. dati mancanti: avviso
   b=boot({privacy:null}); globalThis.__w=b.w; await wait(400);
   b.w.DB.leads.unshift({id:'lm',first:'A',last:'B',company:'C',status:'Ready',ts:Date.now(),ownerId:'u1',createdBy:'u1'});

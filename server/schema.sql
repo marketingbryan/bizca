@@ -145,3 +145,5 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS extra_domains JSONB NOT NULL DEFA
 UPDATE leads SET card_image = NULL WHERE card_image IS NOT NULL;
 -- Which version of the privacy notice the contact accepted when signing (e.g. 2026-11-25/it).
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS consent_version TEXT;
+-- Separate, optional consent to measure email opens and link clicks (Brevo tracking).
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS email_tracking BOOLEAN NOT NULL DEFAULT false;

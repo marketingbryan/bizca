@@ -62,7 +62,8 @@ module.exports = async (req, res) => {
       BIZCA_EVENT: lead.event || '',
       BIZCA_OWNER: lead.owner || '',
       BIZCA_CONSENT: lead.consent || '',
-      BIZCA_NEWSLETTER: lead.newsletter ? 'yes' : 'no'
+      BIZCA_NEWSLETTER: lead.newsletter ? 'yes' : 'no',
+      BIZCA_TRACKING: lead.emailTracking ? 'yes' : 'no'
     };
 
     let result = await brevoUpsert(key, email, full, listIds);

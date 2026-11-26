@@ -26,7 +26,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const API_URL = (process.env.API_URL || '').replace(/\/$/, '');
 // Bump on every deploy that changes the API surface: /health reports it, so we can
 // tell from outside which revision Railway is actually running.
-const BUILD = '2026-11-25-privacy1';
+const BUILD = '2026-11-25-privacy2';
 const ROUTES = ['auth', 'state', 'leads', 'ms', 'i18n', 'activate', 'msauth', 'super'];
 
 const pool = new Pool({
@@ -146,6 +146,7 @@ const outLead = r => ({
   status: r.status, override: r.override_flag, error: r.error,   // the card photo is never stored, never sent back
   consentAt: r.consent_at ? new Date(r.consent_at).getTime() : null, consentSignature: r.consent_sig,
   consentVersion: r.consent_version || null,
+  emailTracking: !!r.email_tracking,
   newsletter: !!r.newsletter, captureType: r.capture_type || null, brevoListId: r.brevo_list_id,
   ts: new Date(r.captured_at).getTime()
 });
@@ -544,13 +545,13 @@ app.put('/leads/:lid', auth, wrap(async (req, res) => {
   const clip = (v, n) => String(v == null ? '' : v).slice(0, n);
 
   const r = await pool.query(
-    `INSERT INTO leads (id,company_id,event_id,owner_id,created_by,first_name,last_name,company_name,role_title,email,phone,website,address,source,country,segment,status,override_flag,error,card_image,consent_at,consent_sig,newsletter,capture_type,brevo_list_id,captured_at,updated_at,consent_version)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,to_timestamp($26/1000.0),now(),$27)
+    `INSERT INTO leads (id,company_id,event_id,owner_id,created_by,first_name,last_name,company_name,role_title,email,phone,website,address,source,country,segment,status,override_flag,error,card_image,consent_at,consent_sig,newsletter,capture_type,brevo_list_id,captured_at,updated_at,consent_version,email_tracking)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,to_timestamp($26/1000.0),now(),$27,$28)
      ON CONFLICT (id) DO UPDATE SET event_id=EXCLUDED.event_id, owner_id=EXCLUDED.owner_id, first_name=EXCLUDED.first_name,
        last_name=EXCLUDED.last_name, company_name=EXCLUDED.company_name, role_title=EXCLUDED.role_title, email=EXCLUDED.email,
        phone=EXCLUDED.phone, website=EXCLUDED.website, address=EXCLUDED.address, source=EXCLUDED.source, country=EXCLUDED.country,
        segment=EXCLUDED.segment, status=EXCLUDED.status, override_flag=EXCLUDED.override_flag, error=EXCLUDED.error,
-       card_image=NULL, consent_at=EXCLUDED.consent_at, consent_sig=EXCLUDED.consent_sig, consent_version=EXCLUDED.consent_version,
+       card_image=NULL, consent_at=EXCLUDED.consent_at, consent_sig=EXCLUDED.consent_sig, consent_version=EXCLUDED.consent_version, email_tracking=EXCLUDED.email_tracking,
        newsletter=EXCLUDED.newsletter, capture_type=EXCLUDED.capture_type, brevo_list_id=EXCLUDED.brevo_list_id, updated_at=now()
      WHERE leads.company_id = EXCLUDED.company_id
      RETURNING id`,
@@ -563,7 +564,8 @@ app.put('/leads/:lid', auth, wrap(async (req, res) => {
      !!l.newsletter, ['event', 'meeting'].indexOf(l.captureType) >= 0 ? l.captureType : null,
      Number.isFinite(parseInt(l.brevoListId, 10)) ? parseInt(l.brevoListId, 10) : null,
      Number.isFinite(Number(l.ts)) ? Number(l.ts) : Date.now(),
-     l.consentAt && l.consentVersion ? clip(l.consentVersion, 40) : null]
+     l.consentAt && l.consentVersion ? clip(l.consentVersion, 40) : null,
+     !!l.emailTracking]
   );
   // No row back means the id already belongs to another company: refuse, never overwrite.
   if (!r.rowCount) return res.status(409).json({ error: 'This lead id is already in use' });
